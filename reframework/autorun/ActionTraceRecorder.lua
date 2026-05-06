@@ -79,6 +79,7 @@ local state = {
 
 local max_reflection_field_count = 80
 local max_reflection_property_count = 80
+local max_member_catalog_count = 120
 local focused_condition_indices = {
     [6944] = true,
     [6981] = true
@@ -86,6 +87,31 @@ local focused_condition_indices = {
 local focused_condition_type_names = {
     ["snow.player.fsm.PlayerFsm2ConditionQuestBaseSeeThrough"] = true,
     ["snow.player.fsm.PlayerFsm2ConditionQuestBaseDamage"] = true
+}
+local focused_motion_ids = {
+    [147] = true,
+    [154] = true,
+    [155] = true,
+    [156] = true
+}
+local focused_node_name_markers = {
+    "atk.atk_147",
+    "atk.atk151"
+}
+local method_catalog_keywords = {
+    "frame",
+    "damage",
+    "guard",
+    "muteki",
+    "invincible",
+    "just",
+    "see",
+    "through",
+    "condition",
+    "success",
+    "counter",
+    "armor",
+    "timer"
 }
 
 -- 这些字段名是“优先尝试读取”的候选项。
@@ -465,6 +491,185 @@ local function collect_type_hierarchy(obj)
     return result
 end
 
+local function matches_method_keyword(name)
+    if not name then
+        return false
+    end
+
+    local lower = name:lower()
+    for _, keyword in ipairs(method_catalog_keywords) do
+        if lower:find(keyword, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function collect_field_catalog(obj, max_count)
+    if not obj then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local declaring_type = get_type_definition_name(current_type)
+        local fields = safe_call(function()
+            return current_type:get_fields()
+        end)
+
+        if fields then
+            for _, field_desc in ipairs(fields) do
+                if count >= max_count then
+                    break
+                end
+
+                local field_name = safe_call(function()
+                    return field_desc:get_name()
+                end)
+
+                if field_name ~= nil and not seen[field_name] then
+                    seen[field_name] = true
+                    local field_type = safe_call(function()
+                        return field_desc:get_type()
+                    end)
+
+                    table.insert(result, {
+                        name = field_name,
+                        typeName = get_type_definition_name(field_type),
+                        declaringType = declaring_type,
+                        readableSimpleValue = is_simple_type_definition(field_type)
+                    })
+                    count = count + 1
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if #result == 0 then
+        return nil
+    end
+
+    return result
+end
+
+local function collect_method_catalog(obj, max_count)
+    if not obj then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local declaring_type = get_type_definition_name(current_type)
+        local methods = safe_call(function()
+            return current_type:get_methods()
+        end)
+
+        if methods then
+            for _, method in ipairs(methods) do
+                if count >= max_count then
+                    break
+                end
+
+                local method_name = safe_call(function()
+                    return method:get_name()
+                end)
+                local param_count = safe_call(function()
+                    return method:get_num_params()
+                end)
+                local return_type = safe_call(function()
+                    return method:get_return_type()
+                end)
+                local signature_key = table.concat({
+                    tostring(method_name),
+                    tostring(param_count),
+                    get_type_definition_name(return_type)
+                }, "|")
+
+                local getter_like = method_name ~= nil and (method_name:find("^get_") or method_name:find("^get"))
+                local should_keep = getter_like or matches_method_keyword(method_name)
+
+                if should_keep and not seen[signature_key] then
+                    seen[signature_key] = true
+                    table.insert(result, {
+                        name = method_name,
+                        declaringType = declaring_type,
+                        paramCount = param_count,
+                        returnType = get_type_definition_name(return_type),
+                        getterLike = getter_like and true or false,
+                        readableSimpleValue = is_simple_type_definition(return_type)
+                    })
+                    count = count + 1
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if #result == 0 then
+        return nil
+    end
+
+    return result
+end
+
+local function get_object_address(obj)
+    if not obj then
+        return nil
+    end
+
+    local memory_view = safe_call(function()
+        return obj:as_memoryview()
+    end)
+
+    if not memory_view then
+        return nil
+    end
+
+    return safe_call(function()
+        return tostring(memory_view:get_address())
+    end)
+end
+
 local function is_focused_condition(condition_info)
     if not condition_info then
         return false
@@ -475,6 +680,32 @@ local function is_focused_condition(condition_info)
     end
 
     return focused_condition_type_names[tostring(condition_info.typeName)] == true
+end
+
+local function is_focused_node_name(node_name)
+    if not node_name then
+        return false
+    end
+
+    for _, marker in ipairs(focused_node_name_markers) do
+        if node_name:find(marker, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function should_build_focused_probe(motion_id, node_name, focus_conditions)
+    if focused_motion_ids[tonumber(motion_id)] then
+        return true
+    end
+
+    if is_focused_node_name(node_name) then
+        return true
+    end
+
+    return focus_conditions ~= nil and #focus_conditions > 0
 end
 
 local function get_collection_size(collection)
@@ -533,6 +764,45 @@ local function get_tree_object(player_game_object)
     end
 
     return layer:get_tree_object()
+end
+
+local function get_action_object(tree, action_index)
+    if not tree then
+        return nil
+    end
+
+    local actions = tree:get_actions()
+    if not actions or action_index == nil or action_index < 0 or action_index >= actions:size() then
+        return nil
+    end
+
+    return actions[action_index]
+end
+
+local function get_condition_object(tree, condition_index)
+    if not tree then
+        return nil
+    end
+
+    local conditions = tree:get_conditions()
+    if not conditions or condition_index == nil or condition_index < 0 or condition_index >= conditions:size() then
+        return nil
+    end
+
+    return conditions[condition_index]
+end
+
+local function get_event_object(tree, event_index)
+    if not tree then
+        return nil
+    end
+
+    local events = tree:get_transitions()
+    if not events or event_index == nil or event_index < 0 or event_index >= events:size() then
+        return nil
+    end
+
+    return events[event_index]
 end
 
 local function get_action_info(tree, action_index, include_deep_fields)
@@ -640,6 +910,67 @@ local function get_event_list(tree, event_index_collection, include_deep_fields)
     end
 
     return result
+end
+
+local function get_action_probe(tree, action_index)
+    local info = get_action_info(tree, action_index, true)
+    local action_obj = get_action_object(tree, action_index)
+
+    if not info then
+        return nil
+    end
+
+    info.objectAddress = get_object_address(action_obj)
+    info.fieldCatalog = collect_field_catalog(action_obj, max_member_catalog_count)
+    info.methodCatalog = collect_method_catalog(action_obj, max_member_catalog_count)
+    return info
+end
+
+local function get_condition_probe(tree, condition_index)
+    local info = get_condition_info(tree, condition_index, true)
+    local condition_obj = get_condition_object(tree, condition_index)
+
+    if not info then
+        return nil
+    end
+
+    info.objectAddress = get_object_address(condition_obj)
+    info.fieldCatalog = collect_field_catalog(condition_obj, max_member_catalog_count)
+    info.methodCatalog = collect_method_catalog(condition_obj, max_member_catalog_count)
+    return info
+end
+
+local function get_event_probe(tree, event_index)
+    local info = get_transition_event_info(tree, event_index, true)
+    local event_obj = get_event_object(tree, event_index)
+
+    if not info then
+        return nil
+    end
+
+    info.objectAddress = get_object_address(event_obj)
+    info.fieldCatalog = collect_field_catalog(event_obj, max_member_catalog_count)
+    info.methodCatalog = collect_method_catalog(event_obj, max_member_catalog_count)
+    return info
+end
+
+local function get_node_parent_summary(node)
+    local parent = safe_call(function()
+        return node:get_parent()
+    end)
+
+    if not parent then
+        return nil
+    end
+
+    return {
+        id = safe_call(function()
+            return parent:get_id()
+        end),
+        name = safe_call(function()
+            return parent:get_full_name()
+        end)
+    }
 end
 
 local function get_node_target_summary(tree, state_index, options)
@@ -817,6 +1148,125 @@ local function build_focus_condition_report(node_id, node_name, transitions, sta
     collect_focus_conditions_from_transitions(result, dedupe, "startTransition", node_id, node_name, start_transitions)
 
     return result
+end
+
+local function build_node_probe(tree, node)
+    if not tree or not node then
+        return nil
+    end
+
+    local node_data = node:get_data()
+    if not node_data then
+        return nil
+    end
+
+    local action_probes = {}
+    local node_actions = node_data:get_actions()
+    for i = 0, get_collection_size(node_actions) - 1 do
+        local action_index = tonumber(node_actions[i])
+        table.insert(action_probes, get_action_probe(tree, action_index))
+    end
+
+    local transitions = get_transition_entries(
+        tree,
+        node_data:get_transition_conditions(),
+        node_data:get_states(),
+        node_data:get_transition_events(),
+        {
+            includeDeepConditionFields = true,
+            includeDeepEventFields = true,
+            includeTargetNodeSummary = true,
+            includeTargetTransitionPreview = true,
+            includeFocusConditionDetails = true
+        }
+    )
+
+    local start_transitions = get_transition_entries(
+        tree,
+        node_data:get_start_transitions(),
+        node_data:get_start_states(),
+        nil,
+        {
+            includeDeepConditionFields = true,
+            includeTargetNodeSummary = true,
+            includeTargetTransitionPreview = true,
+            includeFocusConditionDetails = true
+        }
+    )
+
+    return {
+        id = node:get_id(),
+        name = node:get_full_name(),
+        parent = get_node_parent_summary(node),
+        actions = action_probes,
+        transitions = transitions,
+        startTransitions = start_transitions,
+        focusConditions = build_focus_condition_report(node:get_id(), node:get_full_name(), transitions, start_transitions)
+    }
+end
+
+local function get_node_probe_by_state(tree, state_index)
+    local nodes = tree and tree:get_nodes()
+    if not nodes or state_index == nil or state_index < 0 or state_index >= get_collection_size(nodes) then
+        return nil
+    end
+
+    return build_node_probe(tree, nodes[state_index])
+end
+
+local function build_focused_probe(tree, node, motion_id, focus_conditions)
+    if not tree or not node then
+        return nil
+    end
+
+    local focus_condition_probes = {}
+    local related_state_seen = {}
+    local related_node_probes = {}
+
+    local function add_related_state(state_index)
+        if state_index == nil or related_state_seen[state_index] then
+            return
+        end
+
+        related_state_seen[state_index] = true
+        local node_probe = get_node_probe_by_state(tree, state_index)
+        if node_probe ~= nil then
+            table.insert(related_node_probes, node_probe)
+        end
+    end
+
+    for _, item in ipairs(focus_conditions or {}) do
+        local cond_index = item.condition and item.condition.index or nil
+        local probe = {
+            sourceKind = item.sourceKind,
+            sourceNodeId = item.sourceNodeId,
+            sourceNodeName = item.sourceNodeName,
+            sourceSlot = item.sourceSlot,
+            parentTransitionSlot = item.parentTransitionSlot,
+            parentTargetState = item.parentTargetState,
+            parentTargetNodeName = item.parentTargetNodeName,
+            targetState = item.targetState,
+            condition = cond_index ~= nil and get_condition_probe(tree, cond_index) or item.condition,
+            targetNode = item.targetNode,
+            resolvedTargetNode = get_node_probe_by_state(tree, item.targetState)
+        }
+
+        table.insert(focus_condition_probes, probe)
+        add_related_state(item.targetState)
+    end
+
+    return {
+        motionId = motion_id,
+        nodeId = node:get_id(),
+        nodeName = node:get_full_name(),
+        sourceNode = build_node_probe(tree, node),
+        focusConditionProbes = focus_condition_probes,
+        globalFocusedConditions = {
+            ["6944"] = get_condition_probe(tree, 6944),
+            ["6981"] = get_condition_probe(tree, 6981)
+        },
+        relatedNodes = related_node_probes
+    }
 end
 
 local function get_all_actions(tree)
@@ -1052,6 +1502,10 @@ local function capture_snapshot()
         }
     }
 
+    if should_build_focused_probe(motion_id, snapshot.nodeName, snapshot.focusConditions) then
+        snapshot.focusedProbe = build_focused_probe(tree, node, motion_id, snapshot.focusConditions)
+    end
+
     snapshot.signature = build_signature(snapshot)
     return snapshot
 end
@@ -1152,6 +1606,7 @@ local function draw_current_info()
     imgui.text("Node: " .. tostring(info.nodeId))
     imgui.text("Node Name: " .. tostring(info.nodeName))
     imgui.text("重点 Conditions: " .. tostring(#info.focusConditions or 0))
+    imgui.text("重型深挖: " .. (info.focusedProbe ~= nil and "已命中" or "未命中"))
 
     if imgui.tree_node("当前节点 Actions [" .. tostring(#info.actions) .. "]") then
         for _, action in ipairs(info.actions) do

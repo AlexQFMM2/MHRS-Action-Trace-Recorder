@@ -104,6 +104,8 @@
   当前节点的起始过渡列表
 - `focusConditions`
   当前记录里自动提炼出来的“重点 condition 线索”
+- `focusedProbe`
+  命中重点动作/重点 condition 时才会额外生成的重型深挖结果
 
 每个 `transition` 条目里会包含：
 
@@ -140,6 +142,22 @@
 - `transitionPreview`
   目标节点下一层过渡的简要预览
 
+`focusedProbe` 则是更激进的一层专项信息，主要用于：
+
+- 已经知道目标动作范围后
+- 想围绕这些动作一次性多挖一点底层线索时
+
+它目前会尽量带出：
+
+- `sourceNode`
+  当前命中节点的完整深探针
+- `focusConditionProbes`
+  当前记录里命中的重点 condition 深探针
+- `globalFocusedConditions`
+  直接按 index 读取的全局重点 condition 对象
+- `relatedNodes`
+  这些重点 condition 实际跳去的关键节点深探针
+
 另外，录制版 `action / condition / event` 现在除了原先的常见候选字段外，还会带：
 
 - `scannedFields`
@@ -148,6 +166,10 @@
   通过零参数 getter 额外扫到的简单属性
 - `typeHierarchy`
   当前对象的类型继承链
+- `fieldCatalog`
+  这个对象有哪些 field、类型是什么、定义在哪一层
+- `methodCatalog`
+  这个对象有哪些 getter-like 或关键字命中的方法
 
 这个字段的目标是帮我们尽量把：
 
@@ -168,6 +190,8 @@
 - field
 - property getter
 - type hierarchy
+- field catalog
+- method catalog
 
 这样更适合深挖 `SeeThrough`、`Damage` 这类“字段表面看起来很空”的 condition。
 
@@ -193,6 +217,23 @@
 - 它前一跳和后一跳的大概上下文
 
 这样你后面分析太刀见切、居合时，就不用先在整份 JSON 里肉眼翻所有 transition 了，先搜 `focusConditions` 即可。
+
+如果你已经明确知道当前要追的是：
+
+- `atk_147`
+- `atk151`
+- `motion 147 / 154 / 155 / 156`
+
+那么现在更推荐直接看：
+
+- `focusedProbe`
+
+因为它会比 `focusConditions` 再多带一层：
+
+- 当前节点完整 actions
+- 当前节点完整 transitions
+- 重点 condition 对象自身的成员目录
+- 重点 condition 实际跳到的关键节点
 
 ## 工作方式
 
@@ -225,6 +266,8 @@
 - 目标节点自己还有哪些下一层转场
 
 如果当前记录里正好出现了重点 condition，那么这次记录还会顺手把它们整理到 `focusConditions` 里，方便直接看结论。
+
+如果当前记录本身就是重点动作节点，或者命中了重点 condition，还会再附带 `focusedProbe`，方便你做“一次性重挖”。
 
 ### 当前武器整棵动作树导出
 
@@ -325,6 +368,7 @@
 
 如果你现在要分析太刀见切、居合这种动作，推荐重点先看：
 
+- `focusedProbe`
 - `focusConditions`
 - `transition.condition.typeName`
 - `transition.condition.fields`
