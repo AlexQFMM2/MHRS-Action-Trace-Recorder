@@ -10,6 +10,28 @@
 
 local default_output_prefix = "ActionTraceRecorder"
 
+-- 直接沿用已验证可用的东亚文字字形范围和字体映射。
+-- 这些字体文件需要和 REFramework 脚本一起位于游戏可读取的位置。
+local Glyph_ranges = {
+    0x0020, 0x00FF,
+    0x2000, 0x206F,
+    0x3000, 0x30FF,
+    0x31F0, 0x31FF,
+    0x4e00, 0x9FFF,
+    0xFF00, 0xFFEF,
+    0,
+}
+
+local language_font = {}
+language_font[0] = "NotoSansJP-Regular.otf"
+language_font[11] = "NotoSansKR-Regular.otf"
+language_font[12] = "NotoSansTC-Regular.otf"
+language_font[13] = "NotoSansSC-Regular.otf"
+
+for language, font_name in pairs(language_font) do
+    language_font[language] = imgui.load_font(font_name, 19, Glyph_ranges)
+end
+
 local weapon_names = {
     [0] = "大剑",
     [1] = "斩斧",
@@ -100,6 +122,15 @@ local function get_uptime()
     end
 
     return method:call(nil)
+end
+
+local function get_display_language()
+    local option_manager = sdk.get_managed_singleton("snow.gui.OptionManager")
+    if not option_manager then
+        return nil
+    end
+
+    return option_manager:call("getDisplayLanguage()")
 end
 
 local function get_master_player()
@@ -699,6 +730,13 @@ re.on_draw_ui(function()
     local toggle = false
 
     if imgui.tree_node("Action Trace Recorder") then
+        local language = get_display_language()
+        local has_custom_font = language ~= nil and language_font[language] ~= nil
+
+        if has_custom_font then
+            imgui.push_font(language_font[language])
+        end
+
         if state.recording then
             if imgui.button("停止录制") then
                 stop_recording()
@@ -748,6 +786,10 @@ re.on_draw_ui(function()
         imgui.same_line()
         if imgui.button("清空记录") then
             clear_records()
+        end
+
+        if has_custom_font then
+            imgui.pop_font()
         end
 
         imgui.tree_pop()

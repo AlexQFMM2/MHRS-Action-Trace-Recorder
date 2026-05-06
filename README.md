@@ -21,6 +21,23 @@
 - [ActionTraceRecorder.lua](/home/alexqfmm/workPlace/mhrsAbout/Action%20Trace%20Recorder/reframework/autorun/ActionTraceRecorder.lua)
   实际运行的 REFramework 脚本。
 
+## 中文显示说明
+
+这个项目现在已经按 `Qurious Cheating.lua` 的思路补了东亚字体加载。
+
+脚本会根据游戏当前显示语言，尝试加载这些字体文件：
+
+- `NotoSansJP-Regular.otf`
+- `NotoSansKR-Regular.otf`
+- `NotoSansTC-Regular.otf`
+- `NotoSansSC-Regular.otf`
+
+其中简体中文对应的是：
+
+- `NotoSansSC-Regular.otf`
+
+如果你在游戏里打开 `Action Trace Recorder` 仍然看到中文乱码，通常不是脚本逻辑问题，而是运行环境里缺少对应字体文件，或者字体文件没有放在 `imgui.load_font(...)` 能读取到的位置。
+
 ## 这个工具会输出什么
 
 脚本会把录制结果写到随机文件名，例如：
