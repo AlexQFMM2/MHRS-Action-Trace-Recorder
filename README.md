@@ -102,6 +102,8 @@
   当前节点的普通过渡列表
 - `startTransitions`
   当前节点的起始过渡列表
+- `focusConditions`
+  当前记录里自动提炼出来的“重点 condition 线索”
 
 每个 `transition` 条目里会包含：
 
@@ -142,6 +144,10 @@
 
 - `scannedFields`
   通过反射额外扫描到的“可直接读出的简单字段”
+- `scannedProperties`
+  通过零参数 getter 额外扫到的简单属性
+- `typeHierarchy`
+  当前对象的类型继承链
 
 这个字段的目标是帮我们尽量把：
 
@@ -151,6 +157,42 @@
 - see through / damage / muteki / invincible 一类线索
 
 直接保留下来，减少回头反复补录的次数。
+
+这里特别要说明一下：
+
+- 有些 condition 关键信息不在 field 上
+- 它们可能藏在 `get_xxx()` 这种 getter 属性里
+
+所以现在新版本会同时扫：
+
+- field
+- property getter
+- type hierarchy
+
+这样更适合深挖 `SeeThrough`、`Damage` 这类“字段表面看起来很空”的 condition。
+
+### focusConditions 是干什么的
+
+当录制器碰到我们当前重点盯的 condition 时，会自动把它们单独抽出来，放到：
+
+- `focusConditions`
+
+这一块目前默认重点关注的是：
+
+- `6944`
+  `snow.player.fsm.PlayerFsm2ConditionQuestBaseSeeThrough`
+- `6981`
+  `snow.player.fsm.PlayerFsm2ConditionQuestBaseDamage`
+
+每条 `focusConditions` 里会尽量带上：
+
+- 它是从当前节点的哪条 transition 来的
+- 它来自当前节点，还是某个 `targetNode.transitionPreview`
+- condition 自己的 `fields / scannedFields / scannedProperties / typeHierarchy`
+- 这条 condition 会跳去哪个 `targetState`
+- 它前一跳和后一跳的大概上下文
+
+这样你后面分析太刀见切、居合时，就不用先在整份 JSON 里肉眼翻所有 transition 了，先搜 `focusConditions` 即可。
 
 ## 工作方式
 
@@ -181,6 +223,8 @@
 - 这条 condition 会跳去哪个 target state
 - target state 对应的目标 nodeName 是什么
 - 目标节点自己还有哪些下一层转场
+
+如果当前记录里正好出现了重点 condition，那么这次记录还会顺手把它们整理到 `focusConditions` 里，方便直接看结论。
 
 ### 当前武器整棵动作树导出
 
@@ -237,6 +281,9 @@
 - `当前动作信息`
   实时显示你当前武器、motion、node，以及当前节点下挂着的 actions。
 
+- `重点 Condition 线索`
+  当前这一帧如果命中了重点 condition，会在 UI 里显示简要摘要，方便你边打边确认有没有踩到我们要的判定链。
+
 - `最后一条记录`
   快速查看刚刚写进去的那条数据。
 
@@ -278,9 +325,11 @@
 
 如果你现在要分析太刀见切、居合这种动作，推荐重点先看：
 
+- `focusConditions`
 - `transition.condition.typeName`
 - `transition.condition.fields`
 - `transition.condition.scannedFields`
+- `transition.condition.scannedProperties`
 - `transition.targetNode.nodeName`
 - `transition.targetNode.transitionPreview`
 

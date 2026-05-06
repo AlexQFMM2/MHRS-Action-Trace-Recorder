@@ -78,6 +78,15 @@ local state = {
 }
 
 local max_reflection_field_count = 80
+local max_reflection_property_count = 80
+local focused_condition_indices = {
+    [6944] = true,
+    [6981] = true
+}
+local focused_condition_type_names = {
+    ["snow.player.fsm.PlayerFsm2ConditionQuestBaseSeeThrough"] = true,
+    ["snow.player.fsm.PlayerFsm2ConditionQuestBaseDamage"] = true
+}
 
 -- 这些字段名是“优先尝试读取”的候选项。
 -- 它们并不保证所有类型都存在，但能帮助我们把常见的帧、无敌、判定相关字段尽量抓出来。
@@ -220,6 +229,28 @@ local function serialize_simple_value(value)
     return "<UNSERIALIZABLE>"
 end
 
+local function is_simple_type_definition(type_definition)
+    if type_definition == nil then
+        return true
+    end
+
+    local type_name = safe_call(function()
+        return type_definition:get_full_name()
+    end) or "UNKNOWN_TYPE"
+
+    return type_definition:is_value_type() or type_name == "System.String"
+end
+
+local function get_type_definition_name(type_definition)
+    if type_definition == nil then
+        return "UNKNOWN_TYPE"
+    end
+
+    return safe_call(function()
+        return type_definition:get_full_name()
+    end) or "UNKNOWN_TYPE"
+end
+
 local function collect_existing_fields(obj, candidates)
     local out = {}
 
@@ -278,10 +309,8 @@ local function collect_reflection_fields(obj, max_count)
                     local field_type = safe_call(function()
                         return field_desc:get_type()
                     end)
-                    local field_type_name = field_type and field_type:get_full_name() or "UNKNOWN_FIELD_TYPE"
-                    local should_read = field_type == nil
-                        or field_type:is_value_type()
-                        or field_type_name == "System.String"
+                    local field_type_name = get_type_definition_name(field_type)
+                    local should_read = is_simple_type_definition(field_type)
 
                     if should_read then
                         local raw_value = safe_call(function()
@@ -314,6 +343,138 @@ local function collect_reflection_fields(obj, max_count)
     end
 
     return result
+end
+
+-- 一些判定类对象的关键数据不一定挂在 field 上，也可能藏在零参数 getter 里。
+-- 这里额外扫一遍“像属性一样的 getter”，专门补足 SeeThrough / Damage 一类对象的信息盲区。
+local function collect_reflection_properties(obj, max_count)
+    if not obj then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local methods = safe_call(function()
+            return current_type:get_methods()
+        end)
+
+        if methods then
+            for _, method in ipairs(methods) do
+                if count >= max_count then
+                    break
+                end
+
+                local method_name = safe_call(function()
+                    return method:get_name()
+                end)
+                local param_count = safe_call(function()
+                    return method:get_num_params()
+                end)
+
+                if method_name ~= nil and param_count == 0 then
+                    local property_name = nil
+
+                    if method_name:find("^get_") then
+                        property_name = method_name:sub(5)
+                    elseif method_name:find("^get") then
+                        property_name = method_name:sub(4)
+                    end
+
+                    if property_name ~= nil and property_name ~= "" and not seen[property_name] then
+                        seen[property_name] = true
+
+                        local return_type = safe_call(function()
+                            return method:get_return_type()
+                        end)
+                        local return_type_name = get_type_definition_name(return_type)
+
+                        if is_simple_type_definition(return_type) then
+                            local value = safe_call(function()
+                                return method:call(obj)
+                            end)
+
+                            if value ~= nil then
+                                result[property_name] = {
+                                    getter = method_name,
+                                    typeName = return_type_name,
+                                    value = serialize_simple_value(value)
+                                }
+                                count = count + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if next(result) == nil then
+        return nil
+    end
+
+    return result
+end
+
+local function collect_type_hierarchy(obj)
+    if not obj then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        table.insert(result, get_type_definition_name(current_type))
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if #result == 0 then
+        return nil
+    end
+
+    return result
+end
+
+local function is_focused_condition(condition_info)
+    if not condition_info then
+        return false
+    end
+
+    if focused_condition_indices[tonumber(condition_info.index)] then
+        return true
+    end
+
+    return focused_condition_type_names[tostring(condition_info.typeName)] == true
 end
 
 local function get_collection_size(collection)
@@ -401,7 +562,9 @@ local function get_action_info(tree, action_index, include_deep_fields)
         startFrame = action_obj:get_field("_StartFrame"),
         endFrame = action_obj:get_field("_EndFrame"),
         fields = collect_existing_fields(action_obj, action_field_candidates),
-        scannedFields = include_deep_fields and collect_reflection_fields(action_obj, max_reflection_field_count) or nil
+        scannedFields = include_deep_fields and collect_reflection_fields(action_obj, max_reflection_field_count) or nil,
+        scannedProperties = include_deep_fields and collect_reflection_properties(action_obj, max_reflection_property_count) or nil,
+        typeHierarchy = include_deep_fields and collect_type_hierarchy(action_obj) or nil
     }
 end
 
@@ -430,7 +593,9 @@ local function get_condition_info(tree, condition_index, include_deep_fields)
         index = condition_index,
         typeName = get_type_name(condition_obj),
         fields = collect_existing_fields(condition_obj, condition_field_candidates),
-        scannedFields = include_deep_fields and collect_reflection_fields(condition_obj, max_reflection_field_count) or nil
+        scannedFields = include_deep_fields and collect_reflection_fields(condition_obj, max_reflection_field_count) or nil,
+        scannedProperties = include_deep_fields and collect_reflection_properties(condition_obj, max_reflection_property_count) or nil,
+        typeHierarchy = include_deep_fields and collect_type_hierarchy(condition_obj) or nil
     }
 end
 
@@ -459,7 +624,9 @@ local function get_transition_event_info(tree, event_index, include_deep_fields)
         index = event_index,
         typeName = get_type_name(event_obj),
         fields = collect_existing_fields(event_obj, event_field_candidates),
-        scannedFields = include_deep_fields and collect_reflection_fields(event_obj, max_reflection_field_count) or nil
+        scannedFields = include_deep_fields and collect_reflection_fields(event_obj, max_reflection_field_count) or nil,
+        scannedProperties = include_deep_fields and collect_reflection_properties(event_obj, max_reflection_property_count) or nil,
+        typeHierarchy = include_deep_fields and collect_type_hierarchy(event_obj) or nil
     }
 end
 
@@ -475,7 +642,8 @@ local function get_event_list(tree, event_index_collection, include_deep_fields)
     return result
 end
 
-local function get_node_target_summary(tree, state_index, include_transition_preview)
+local function get_node_target_summary(tree, state_index, options)
+    options = options or {}
     local nodes = tree and tree:get_nodes()
     if not nodes or state_index == nil or state_index < 0 or state_index >= get_collection_size(nodes) then
         return {
@@ -516,7 +684,7 @@ local function get_node_target_summary(tree, state_index, include_transition_pre
         startTransitionCount = get_collection_size(node_data and node_data:get_start_transitions())
     }
 
-    if include_transition_preview and node_data then
+    if options.includeTransitionPreview and node_data then
         local preview = {}
         local transition_conditions = node_data:get_transition_conditions()
         local transition_states = node_data:get_states()
@@ -525,13 +693,21 @@ local function get_node_target_summary(tree, state_index, include_transition_pre
         for i = 0, size - 1 do
             local condition_index = tonumber(transition_conditions[i])
             local target_state = tonumber(transition_states[i])
-            local condition_info = get_condition_info(tree, condition_index, true)
+            local condition_info = get_condition_info(tree, condition_index, false)
+            local focused_condition_info = nil
+
+            if options.includeFocusConditionDetails and is_focused_condition(condition_info) then
+                focused_condition_info = get_condition_info(tree, condition_index, true)
+            end
 
             table.insert(preview, {
                 slot = i,
                 conditionIndex = condition_index,
                 conditionType = condition_info and condition_info.typeName or "UNKNOWN_CONDITION",
                 conditionFields = condition_info and condition_info.fields or nil,
+                conditionScannedFields = focused_condition_info and focused_condition_info.scannedFields or nil,
+                conditionScannedProperties = focused_condition_info and focused_condition_info.scannedProperties or nil,
+                conditionTypeHierarchy = focused_condition_info and focused_condition_info.typeHierarchy or nil,
                 targetState = target_state
             })
         end
@@ -561,11 +737,86 @@ local function get_transition_entries(tree, condition_collection, state_collecti
             condition = get_condition_info(tree, condition_index, options.includeDeepConditionFields),
             targetState = target_state,
             events = events,
-            targetNode = options.includeTargetNodeSummary and get_node_target_summary(tree, target_state, options.includeTargetTransitionPreview) or nil
+            targetNode = options.includeTargetNodeSummary and get_node_target_summary(tree, target_state, {
+                includeTransitionPreview = options.includeTargetTransitionPreview,
+                includeFocusConditionDetails = options.includeFocusConditionDetails
+            }) or nil
         })
     end
 
     return entries
+end
+
+local function append_focus_condition_entry(result, dedupe, entry)
+    local key = table.concat({
+        tostring(entry.sourceKind),
+        tostring(entry.sourceNodeId),
+        tostring(entry.sourceSlot),
+        tostring(entry.parentTransitionSlot),
+        tostring(entry.condition and entry.condition.index),
+        tostring(entry.targetState)
+    }, "|")
+
+    if dedupe[key] then
+        return
+    end
+
+    dedupe[key] = true
+    table.insert(result, entry)
+end
+
+local function collect_focus_conditions_from_transitions(result, dedupe, source_kind, source_node_id, source_node_name, transitions)
+    for _, transition in ipairs(transitions or {}) do
+        local condition_info = transition.condition
+        if is_focused_condition(condition_info) then
+            append_focus_condition_entry(result, dedupe, {
+                sourceKind = source_kind,
+                sourceNodeId = source_node_id,
+                sourceNodeName = source_node_name,
+                sourceSlot = transition.slot,
+                condition = condition_info,
+                targetState = transition.targetState,
+                targetNode = transition.targetNode
+            })
+        end
+
+        local target_node = transition.targetNode or {}
+        for _, preview in ipairs(target_node.transitionPreview or {}) do
+            local preview_condition = {
+                index = preview.conditionIndex,
+                typeName = preview.conditionType,
+                fields = preview.conditionFields,
+                scannedFields = preview.conditionScannedFields,
+                scannedProperties = preview.conditionScannedProperties,
+                typeHierarchy = preview.conditionTypeHierarchy
+            }
+
+            if is_focused_condition(preview_condition) then
+                append_focus_condition_entry(result, dedupe, {
+                    sourceKind = source_kind .. ".targetPreview",
+                    sourceNodeId = target_node.nodeId,
+                    sourceNodeName = target_node.nodeName,
+                    sourceSlot = preview.slot,
+                    parentTransitionSlot = transition.slot,
+                    parentTargetState = transition.targetState,
+                    parentTargetNodeName = target_node.nodeName,
+                    condition = preview_condition,
+                    targetState = preview.targetState,
+                    targetNode = nil
+                })
+            end
+        end
+    end
+end
+
+local function build_focus_condition_report(node_id, node_name, transitions, start_transitions)
+    local result = {}
+    local dedupe = {}
+
+    collect_focus_conditions_from_transitions(result, dedupe, "transition", node_id, node_name, transitions)
+    collect_focus_conditions_from_transitions(result, dedupe, "startTransition", node_id, node_name, start_transitions)
+
+    return result
 end
 
 local function get_all_actions(tree)
@@ -755,7 +1006,8 @@ local function capture_snapshot()
             includeDeepConditionFields = true,
             includeDeepEventFields = true,
             includeTargetNodeSummary = true,
-            includeTargetTransitionPreview = true
+            includeTargetTransitionPreview = true,
+            includeFocusConditionDetails = true
         }
     )
     local start_transitions = get_transition_entries(
@@ -766,7 +1018,8 @@ local function capture_snapshot()
         {
             includeDeepConditionFields = true,
             includeTargetNodeSummary = true,
-            includeTargetTransitionPreview = true
+            includeTargetTransitionPreview = true,
+            includeFocusConditionDetails = true
         }
     )
 
@@ -791,6 +1044,7 @@ local function capture_snapshot()
         actions = actions,
         transitions = transitions,
         startTransitions = start_transitions,
+        focusConditions = build_focus_condition_report(node_id, node:get_full_name(), transitions, start_transitions),
         nodeSummary = {
             actionCount = #actions,
             transitionCount = #transitions,
@@ -897,6 +1151,7 @@ local function draw_current_info()
     imgui.text("Motion Bank / ID / Frame: " .. tostring(info.motionBank) .. " / " .. tostring(info.motionId) .. " / " .. tostring(info.motionFrame))
     imgui.text("Node: " .. tostring(info.nodeId))
     imgui.text("Node Name: " .. tostring(info.nodeName))
+    imgui.text("重点 Conditions: " .. tostring(#info.focusConditions or 0))
 
     if imgui.tree_node("当前节点 Actions [" .. tostring(#info.actions) .. "]") then
         for _, action in ipairs(info.actions) do
@@ -925,6 +1180,19 @@ local function draw_current_info()
                 " | cond=" .. condition_index ..
                 " | state=" .. tostring(transition.targetState) ..
                 " | " .. condition_name
+            )
+        end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("重点 Condition 线索 [" .. tostring(#info.focusConditions or 0) .. "]") then
+        for _, item in ipairs(info.focusConditions or {}) do
+            imgui.text(
+                tostring(item.sourceKind) ..
+                " | slot=" .. tostring(item.sourceSlot) ..
+                " | cond=" .. tostring(item.condition and item.condition.index or "?") ..
+                " | " .. tostring(item.condition and item.condition.typeName or "UNKNOWN") ..
+                " | state=" .. tostring(item.targetState)
             )
         end
         imgui.tree_pop()
