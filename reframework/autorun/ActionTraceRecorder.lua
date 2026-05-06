@@ -49,6 +49,23 @@ local weapon_names = {
     [13] = "弓"
 }
 
+local weapon_names_en = {
+    [0] = "GreatSword",
+    [1] = "SwitchAxe",
+    [2] = "LongSword",
+    [3] = "LightBowgun",
+    [4] = "HeavyBowgun",
+    [5] = "Hammer",
+    [6] = "Gunlance",
+    [7] = "Lance",
+    [8] = "SwordAndShield",
+    [9] = "DualBlades",
+    [10] = "HuntingHorn",
+    [11] = "ChargeBlade",
+    [12] = "InsectGlaive",
+    [13] = "Bow"
+}
+
 local state = {
     recording = false,
     onlyWhenWeaponDrawn = true,
@@ -59,6 +76,8 @@ local state = {
     outputPath = default_output_prefix .. ".json",
     lastDumpPath = nil
 }
+
+local max_reflection_field_count = 80
 
 -- 这些字段名是“优先尝试读取”的候选项。
 -- 它们并不保证所有类型都存在，但能帮助我们把常见的帧、无敌、判定相关字段尽量抓出来。
@@ -174,6 +193,33 @@ local function safe_get_field(obj, field_name)
     return nil
 end
 
+local function safe_call(fn)
+    local ok, value = pcall(fn)
+    if ok then
+        return value
+    end
+
+    return nil
+end
+
+local function serialize_simple_value(value)
+    local value_type = type(value)
+
+    if value_type == "nil" or value_type == "number" or value_type == "string" or value_type == "boolean" then
+        return value
+    end
+
+    local text = safe_call(function()
+        return tostring(value)
+    end)
+
+    if text ~= nil then
+        return text
+    end
+
+    return "<UNSERIALIZABLE>"
+end
+
 local function collect_existing_fields(obj, candidates)
     local out = {}
 
@@ -189,6 +235,85 @@ local function collect_existing_fields(obj, candidates)
     end
 
     return out
+end
+
+-- 这里用反射把对象上“当前能直接读到的简单字段”尽量扫出来。
+-- 只抓值类型和字符串，避免把复杂对象整坨塞进 json 导致内容失控。
+local function collect_reflection_fields(obj, max_count)
+    if not obj then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local fields = safe_call(function()
+            return current_type:get_fields()
+        end)
+
+        if fields then
+            for _, field_desc in ipairs(fields) do
+                if count >= max_count then
+                    break
+                end
+
+                local field_name = safe_call(function()
+                    return field_desc:get_name()
+                end)
+
+                if field_name ~= nil and not seen[field_name] then
+                    seen[field_name] = true
+
+                    local field_type = safe_call(function()
+                        return field_desc:get_type()
+                    end)
+                    local field_type_name = field_type and field_type:get_full_name() or "UNKNOWN_FIELD_TYPE"
+                    local should_read = field_type == nil
+                        or field_type:is_value_type()
+                        or field_type_name == "System.String"
+
+                    if should_read then
+                        local raw_value = safe_call(function()
+                            return field_desc:get_data(obj)
+                        end)
+
+                        if raw_value ~= nil then
+                            result[field_name] = {
+                                typeName = field_type_name,
+                                value = serialize_simple_value(raw_value)
+                            }
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if next(result) == nil then
+        return nil
+    end
+
+    return result
 end
 
 local function get_collection_size(collection)
@@ -249,7 +374,7 @@ local function get_tree_object(player_game_object)
     return layer:get_tree_object()
 end
 
-local function get_action_info(tree, action_index)
+local function get_action_info(tree, action_index, include_deep_fields)
     if not tree then
         return nil
     end
@@ -275,11 +400,12 @@ local function get_action_info(tree, action_index)
         typeName = get_type_name(action_obj),
         startFrame = action_obj:get_field("_StartFrame"),
         endFrame = action_obj:get_field("_EndFrame"),
-        fields = collect_existing_fields(action_obj, action_field_candidates)
+        fields = collect_existing_fields(action_obj, action_field_candidates),
+        scannedFields = include_deep_fields and collect_reflection_fields(action_obj, max_reflection_field_count) or nil
     }
 end
 
-local function get_condition_info(tree, condition_index)
+local function get_condition_info(tree, condition_index, include_deep_fields)
     if not tree then
         return nil
     end
@@ -303,11 +429,12 @@ local function get_condition_info(tree, condition_index)
     return {
         index = condition_index,
         typeName = get_type_name(condition_obj),
-        fields = collect_existing_fields(condition_obj, condition_field_candidates)
+        fields = collect_existing_fields(condition_obj, condition_field_candidates),
+        scannedFields = include_deep_fields and collect_reflection_fields(condition_obj, max_reflection_field_count) or nil
     }
 end
 
-local function get_transition_event_info(tree, event_index)
+local function get_transition_event_info(tree, event_index, include_deep_fields)
     if not tree then
         return nil
     end
@@ -331,23 +458,92 @@ local function get_transition_event_info(tree, event_index)
     return {
         index = event_index,
         typeName = get_type_name(event_obj),
-        fields = collect_existing_fields(event_obj, event_field_candidates)
+        fields = collect_existing_fields(event_obj, event_field_candidates),
+        scannedFields = include_deep_fields and collect_reflection_fields(event_obj, max_reflection_field_count) or nil
     }
 end
 
-local function get_event_list(tree, event_index_collection)
+local function get_event_list(tree, event_index_collection, include_deep_fields)
     local result = {}
     local size = get_collection_size(event_index_collection)
 
     for i = 0, size - 1 do
         local event_index = tonumber(event_index_collection[i])
-        table.insert(result, get_transition_event_info(tree, event_index))
+        table.insert(result, get_transition_event_info(tree, event_index, include_deep_fields))
     end
 
     return result
 end
 
-local function get_transition_entries(tree, condition_collection, state_collection, event_collection)
+local function get_node_target_summary(tree, state_index, include_transition_preview)
+    local nodes = tree and tree:get_nodes()
+    if not nodes or state_index == nil or state_index < 0 or state_index >= get_collection_size(nodes) then
+        return {
+            stateIndex = state_index,
+            nodeId = nil,
+            nodeName = "INVALID_STATE_INDEX"
+        }
+    end
+
+    local node = nodes[state_index]
+    if not node then
+        return {
+            stateIndex = state_index,
+            nodeId = nil,
+            nodeName = "NIL_STATE_NODE"
+        }
+    end
+
+    local node_data = node:get_data()
+    local action_indices = {}
+    local action_types = {}
+    local actions = node_data and node_data:get_actions()
+
+    for i = 0, get_collection_size(actions) - 1 do
+        local action_index = tonumber(actions[i])
+        local action_info = get_action_info(tree, action_index, false)
+        table.insert(action_indices, action_index)
+        table.insert(action_types, action_info and action_info.typeName or "UNKNOWN_ACTION")
+    end
+
+    local summary = {
+        stateIndex = state_index,
+        nodeId = node:get_id(),
+        nodeName = node:get_full_name(),
+        actionIndices = action_indices,
+        actionTypes = action_types,
+        transitionCount = get_collection_size(node_data and node_data:get_transition_conditions()),
+        startTransitionCount = get_collection_size(node_data and node_data:get_start_transitions())
+    }
+
+    if include_transition_preview and node_data then
+        local preview = {}
+        local transition_conditions = node_data:get_transition_conditions()
+        local transition_states = node_data:get_states()
+        local size = math.min(get_collection_size(transition_conditions), get_collection_size(transition_states))
+
+        for i = 0, size - 1 do
+            local condition_index = tonumber(transition_conditions[i])
+            local target_state = tonumber(transition_states[i])
+            local condition_info = get_condition_info(tree, condition_index, true)
+
+            table.insert(preview, {
+                slot = i,
+                conditionIndex = condition_index,
+                conditionType = condition_info and condition_info.typeName or "UNKNOWN_CONDITION",
+                conditionFields = condition_info and condition_info.fields or nil,
+                targetState = target_state
+            })
+        end
+
+        summary.transitionPreview = preview
+    end
+
+    return summary
+end
+
+local function get_transition_entries(tree, condition_collection, state_collection, event_collection, options)
+    options = options or {}
     local entries = {}
     local size = math.min(get_collection_size(condition_collection), get_collection_size(state_collection))
 
@@ -357,14 +553,15 @@ local function get_transition_entries(tree, condition_collection, state_collecti
         local events = nil
 
         if event_collection ~= nil then
-            events = get_event_list(tree, event_collection[i])
+            events = get_event_list(tree, event_collection[i], options.includeDeepEventFields)
         end
 
         table.insert(entries, {
             slot = i,
-            condition = get_condition_info(tree, condition_index),
+            condition = get_condition_info(tree, condition_index, options.includeDeepConditionFields),
             targetState = target_state,
-            events = events
+            events = events,
+            targetNode = options.includeTargetNodeSummary and get_node_target_summary(tree, target_state, options.includeTargetTransitionPreview) or nil
         })
     end
 
@@ -381,7 +578,7 @@ local function get_all_actions(tree)
     local size = get_collection_size(actions)
 
     for i = 0, size - 1 do
-        table.insert(result, get_action_info(tree, i))
+        table.insert(result, get_action_info(tree, i, false))
     end
 
     return result
@@ -437,12 +634,14 @@ local function get_node_entry(tree, node)
             tree,
             node_data:get_transition_conditions(),
             node_data:get_states(),
-            node_data:get_transition_events()
+            node_data:get_transition_events(),
+            nil
         ),
         startTransitions = get_transition_entries(
             tree,
             node_data:get_start_transitions(),
             node_data:get_start_states(),
+            nil,
             nil
         )
     }
@@ -485,6 +684,7 @@ local function build_tree_dump()
         uptime = get_uptime(),
         weaponType = weapon_type,
         weaponName = weapon_names[weapon_type] or ("未知武器(" .. tostring(weapon_type) .. ")"),
+        weaponNameEn = weapon_names_en[weapon_type] or ("WeaponType" .. tostring(weapon_type)),
         currentNodeId = behavior_tree:call("getCurrentNodeID", 0),
         counts = {
             actions = get_collection_size(tree:get_actions()),
@@ -550,19 +750,30 @@ local function capture_snapshot()
         tree,
         node_data:get_transition_conditions(),
         node_data:get_states(),
-        node_data:get_transition_events()
+        node_data:get_transition_events(),
+        {
+            includeDeepConditionFields = true,
+            includeDeepEventFields = true,
+            includeTargetNodeSummary = true,
+            includeTargetTransitionPreview = true
+        }
     )
     local start_transitions = get_transition_entries(
         tree,
         node_data:get_start_transitions(),
         node_data:get_start_states(),
-        nil
+        nil,
+        {
+            includeDeepConditionFields = true,
+            includeTargetNodeSummary = true,
+            includeTargetTransitionPreview = true
+        }
     )
 
     if node_actions then
         for i = 0, node_actions:size() - 1 do
             local action_index = tonumber(node_actions[i])
-            table.insert(actions, get_action_info(tree, action_index))
+            table.insert(actions, get_action_info(tree, action_index, true))
         end
     end
 
@@ -571,6 +782,7 @@ local function capture_snapshot()
         uptime = get_uptime(),
         weaponType = weapon_type,
         weaponName = weapon_names[weapon_type] or ("未知武器(" .. tostring(weapon_type) .. ")"),
+        weaponNameEn = weapon_names_en[weapon_type] or ("WeaponType" .. tostring(weapon_type)),
         motionId = motion_id,
         motionBank = motion_bank,
         motionFrame = motion_frame,
@@ -578,7 +790,12 @@ local function capture_snapshot()
         nodeName = node:get_full_name(),
         actions = actions,
         transitions = transitions,
-        startTransitions = start_transitions
+        startTransitions = start_transitions,
+        nodeSummary = {
+            actionCount = #actions,
+            transitionCount = #transitions,
+            startTransitionCount = #start_transitions
+        }
     }
 
     snapshot.signature = build_signature(snapshot)
@@ -611,7 +828,9 @@ local function clear_records()
 end
 
 local function load_existing_records()
-    local payload = json.load_file(output_path)
+    local payload = safe_call(function()
+        return json.load_file(state.outputPath)
+    end)
     if type(payload) ~= "table" or type(payload.records) ~= "table" then
         return
     end
@@ -647,8 +866,8 @@ local function dump_current_tree()
         return nil
     end
 
-    local weapon_name = payload.weaponName:gsub("%s+", "_")
-    local output_path = "ActionTreeDump_" .. weapon_name .. "_" .. now_file_string() .. "_" .. tostring(math.random(1000, 9999)) .. ".json"
+    local weapon_name = payload.weaponNameEn or ("WeaponType" .. tostring(payload.weaponType))
+    local output_path = "ActionTreeDump_" .. weapon_name .. ".json"
     json.dump_file(output_path, payload)
     state.lastDumpPath = output_path
     return output_path

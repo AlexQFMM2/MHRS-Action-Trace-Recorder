@@ -46,9 +46,17 @@
 
 这样每次开始录制都会生成一份新的记录文件，不会反复覆盖同名文件。
 
-另外，“整棵动作树导出”会写到另一类随机文件名，例如：
+另外，“整棵动作树导出”现在会写到按武器英文名区分的固定文件名，例如：
 
-- `ActionTreeDump_太刀_20260506_163055_7312.json`
+- `ActionTreeDump_LongSword.json`
+- `ActionTreeDump_Lance.json`
+
+这类文件默认会被同武器的下一次导出覆盖。
+
+这样做的原因是：
+
+- 同一武器的整棵动作树通常相对稳定
+- 文件名改成英文后，更方便后面直接做脚本处理、比对和提交到仓库
 
 输出内容大致包含：
 
@@ -60,6 +68,8 @@
   武器类型编号
 - `weaponName`
   武器名称
+- `weaponNameEn`
+  武器英文名称，主要用于稳定命名整树导出文件
 - `motionId`
   当前动作 id
 - `motionBank`
@@ -104,6 +114,44 @@
 - `events`
   这条过渡挂着的 transition events
 
+现在录制版 `transition` 里还会额外带上：
+
+- `targetNode`
+  这条过渡要跳去的目标节点摘要
+
+`targetNode` 会尽量带出：
+
+- `stateIndex`
+  当前 transition 指向的状态索引
+- `nodeId`
+  目标节点 id
+- `nodeName`
+  目标节点完整名称
+- `actionIndices`
+  目标节点上挂着的 action index 列表
+- `actionTypes`
+  对应 action 的类型名
+- `transitionCount`
+  目标节点自己的 transitions 数量
+- `startTransitionCount`
+  目标节点自己的 startTransitions 数量
+- `transitionPreview`
+  目标节点下一层过渡的简要预览
+
+另外，录制版 `action / condition / event` 现在除了原先的常见候选字段外，还会带：
+
+- `scannedFields`
+  通过反射额外扫描到的“可直接读出的简单字段”
+
+这个字段的目标是帮我们尽量把：
+
+- 帧段
+- 判定开关
+- 受击相关标志
+- see through / damage / muteki / invincible 一类线索
+
+直接保留下来，减少回头反复补录的次数。
+
 ## 工作方式
 
 这个工具现在同时支持两类输出：
@@ -124,6 +172,15 @@
 - 当前节点上的 `action` 列表
 
 这样做可以避免每帧都疯狂写文件，同时又能在你打出不同动作时留下轨迹。
+
+现在的录制还会额外把“当前节点指向的下一层目标节点摘要”一起带上。
+
+这对太刀见切、居合这类“成功 / 失败不是写在 action 里，而是写在 transition condition 里”的动作特别有用，因为你可以直接看到：
+
+- 当前节点命中了什么 condition
+- 这条 condition 会跳去哪个 target state
+- target state 对应的目标 nodeName 是什么
+- 目标节点自己还有哪些下一层转场
 
 ### 当前武器整棵动作树导出
 
@@ -157,6 +214,11 @@
 3. 展开 `Action Trace Recorder`。
 4. 点击 `导出当前武器整棵动作树`。
 5. 查看生成的 `ActionTreeDump_*.json`。
+
+注意：
+
+- 现在整树导出会覆盖同武器的旧文件
+- 例如太刀永远写到 `ActionTreeDump_LongSword.json`
 
 ## UI 说明
 
@@ -213,6 +275,16 @@
 - 成功节点和失败节点的 `nodeName` 有什么区别
 
 也就是说，升级版记录器除了帮你看 action，也能帮你看“这个动作是怎么从当前节点跳去成功/失败分支”的。
+
+如果你现在要分析太刀见切、居合这种动作，推荐重点先看：
+
+- `transition.condition.typeName`
+- `transition.condition.fields`
+- `transition.condition.scannedFields`
+- `transition.targetNode.nodeName`
+- `transition.targetNode.transitionPreview`
+
+这样通常能比单看 `actions` 更快定位到真正的“成否判定节点”。
 
 如果你还不确定应该录哪个动作，也可以先点一次“导出当前武器整棵动作树”，从整树 JSON 里先筛：
 
