@@ -8,7 +8,7 @@
 --
 -- 这样后续定位“某个 GP 动作到底对应哪个 ActionIndex”时，就不需要纯手工抄了。
 
-local output_path = "ActionTraceRecorder.json"
+local default_output_prefix = "ActionTraceRecorder"
 
 local weapon_names = {
     [0] = "大剑",
@@ -33,7 +33,9 @@ local state = {
     records = {},
     lastSignature = nil,
     lastSavedCount = 0,
-    currentInfo = nil
+    currentInfo = nil,
+    outputPath = default_output_prefix .. ".json",
+    lastDumpPath = nil
 }
 
 -- 这些字段名是“优先尝试读取”的候选项。
@@ -71,8 +73,19 @@ local event_field_candidates = {
     "_EndFrame"
 }
 
+math.randomseed(os.time())
+
 local function now_string()
     return os.date("%Y-%m-%d %H:%M:%S")
+end
+
+local function now_file_string()
+    return os.date("%Y%m%d_%H%M%S")
+end
+
+local function make_random_output_path(prefix)
+    local random_part = math.random(1000, 9999)
+    return prefix .. "_" .. now_file_string() .. "_" .. tostring(random_part) .. ".json"
 end
 
 local function get_uptime()
@@ -327,6 +340,134 @@ local function get_transition_entries(tree, condition_collection, state_collecti
     return entries
 end
 
+local function get_all_actions(tree)
+    local result = {}
+    if not tree then
+        return result
+    end
+
+    local actions = tree:get_actions()
+    local size = get_collection_size(actions)
+
+    for i = 0, size - 1 do
+        table.insert(result, get_action_info(tree, i))
+    end
+
+    return result
+end
+
+local function get_all_conditions(tree)
+    local result = {}
+    if not tree then
+        return result
+    end
+
+    local conditions = tree:get_conditions()
+    local size = get_collection_size(conditions)
+
+    for i = 0, size - 1 do
+        table.insert(result, get_condition_info(tree, i))
+    end
+
+    return result
+end
+
+local function get_all_events(tree)
+    local result = {}
+    if not tree then
+        return result
+    end
+
+    local events = tree:get_transitions()
+    local size = get_collection_size(events)
+
+    for i = 0, size - 1 do
+        table.insert(result, get_transition_event_info(tree, i))
+    end
+
+    return result
+end
+
+local function get_node_entry(tree, node)
+    local node_data = node:get_data()
+    local action_indices = {}
+    local node_actions = node_data:get_actions()
+    local action_size = get_collection_size(node_actions)
+
+    for i = 0, action_size - 1 do
+        table.insert(action_indices, tonumber(node_actions[i]))
+    end
+
+    return {
+        id = node:get_id(),
+        name = node:get_full_name(),
+        actions = action_indices,
+        transitions = get_transition_entries(
+            tree,
+            node_data:get_transition_conditions(),
+            node_data:get_states(),
+            node_data:get_transition_events()
+        ),
+        startTransitions = get_transition_entries(
+            tree,
+            node_data:get_start_transitions(),
+            node_data:get_start_states(),
+            nil
+        )
+    }
+end
+
+local function get_all_nodes(tree)
+    local result = {}
+    if not tree then
+        return result
+    end
+
+    local nodes = tree:get_nodes()
+    local size = get_collection_size(nodes)
+
+    for i = 0, size - 1 do
+        table.insert(result, get_node_entry(tree, nodes[i]))
+    end
+
+    return result
+end
+
+local function build_tree_dump()
+    local master_player = get_master_player()
+    if not master_player then
+        return nil
+    end
+
+    local player_game_object = get_player_game_object(master_player)
+    local behavior_tree = get_behavior_tree(player_game_object)
+    local tree = get_tree_object(player_game_object)
+    if not behavior_tree or not tree then
+        return nil
+    end
+
+    local weapon_type = master_player:get_field("_playerWeaponType")
+
+    return {
+        version = 1,
+        dumpedAt = now_string(),
+        uptime = get_uptime(),
+        weaponType = weapon_type,
+        weaponName = weapon_names[weapon_type] or ("未知武器(" .. tostring(weapon_type) .. ")"),
+        currentNodeId = behavior_tree:call("getCurrentNodeID", 0),
+        counts = {
+            actions = get_collection_size(tree:get_actions()),
+            conditions = get_collection_size(tree:get_conditions()),
+            events = get_collection_size(tree:get_transitions()),
+            nodes = get_collection_size(tree:get_nodes())
+        },
+        actions = get_all_actions(tree),
+        conditions = get_all_conditions(tree),
+        events = get_all_events(tree),
+        nodes = get_all_nodes(tree)
+    }
+end
+
 local function build_signature(snapshot)
     local action_indices = {}
 
@@ -421,7 +562,7 @@ local function save_records()
         records = state.records
     }
 
-    json.dump_file(output_path, payload)
+    json.dump_file(state.outputPath, payload)
     state.lastSavedCount = #state.records
 end
 
@@ -454,6 +595,33 @@ local function load_existing_records()
 end
 
 load_existing_records()
+
+local function begin_recording()
+    state.outputPath = make_random_output_path(default_output_prefix)
+    state.records = {}
+    state.lastSignature = nil
+    state.lastSavedCount = 0
+    state.recording = true
+    save_records()
+end
+
+local function stop_recording()
+    state.recording = false
+    save_records()
+end
+
+local function dump_current_tree()
+    local payload = build_tree_dump()
+    if payload == nil then
+        return nil
+    end
+
+    local weapon_name = payload.weaponName:gsub("%s+", "_")
+    local output_path = "ActionTreeDump_" .. weapon_name .. "_" .. now_file_string() .. "_" .. tostring(math.random(1000, 9999)) .. ".json"
+    json.dump_file(output_path, payload)
+    state.lastDumpPath = output_path
+    return output_path
+end
 
 re.on_frame(function()
     local snapshot = capture_snapshot()
@@ -524,7 +692,7 @@ local function draw_last_record()
     imgui.text("武器: " .. tostring(last_record.weaponName))
     imgui.text("Motion Bank / ID: " .. tostring(last_record.motionBank) .. " / " .. tostring(last_record.motionId))
     imgui.text("Node: " .. tostring(last_record.nodeId))
-    imgui.text("已写入文件: " .. output_path)
+    imgui.text("已写入文件: " .. state.outputPath)
 end
 
 re.on_draw_ui(function()
@@ -533,11 +701,11 @@ re.on_draw_ui(function()
     if imgui.tree_node("Action Trace Recorder") then
         if state.recording then
             if imgui.button("停止录制") then
-                state.recording = false
+                stop_recording()
             end
         else
             if imgui.button("开始录制") then
-                state.recording = true
+                begin_recording()
             end
         end
 
@@ -549,11 +717,19 @@ re.on_draw_ui(function()
             end
         end
 
+        imgui.same_line()
+        if imgui.button("导出当前武器整棵动作树") then
+            dump_current_tree()
+        end
+
         toggle, state.onlyWhenWeaponDrawn = imgui.checkbox("只在拔刀时记录", state.onlyWhenWeaponDrawn)
 
         imgui.text("录制状态: " .. (state.recording and "录制中" or "未录制"))
         imgui.text("记录数量: " .. tostring(#state.records))
-        imgui.text("输出文件: " .. output_path)
+        imgui.text("录制文件: " .. state.outputPath)
+        if state.lastDumpPath ~= nil then
+            imgui.text("最近导出的整树文件: " .. state.lastDumpPath)
+        end
 
         if imgui.tree_node("当前动作信息") then
             draw_current_info()
