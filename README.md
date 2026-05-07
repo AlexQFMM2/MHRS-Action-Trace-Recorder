@@ -76,6 +76,8 @@
   当前动作 bank
 - `motionFrame`
   当前动作帧
+- `recentMotionIds`
+  最近几次玩家触发过的 `MotionID` 历史
 - `nodeId`
   当前行为树节点 id
 - `nodeName`
@@ -106,6 +108,25 @@
   当前记录里自动提炼出来的“重点 condition 线索”
 - `focusedProbe`
   命中重点动作/重点 condition 时才会额外生成的重型深挖结果
+- `lastHitEvent`
+  最近一次命中事件的摘要
+
+当录制过程中发生真正的玩家命中时，新版本还会额外插入一条：
+
+- `recordTrigger = "hit"`
+
+这种记录除了当前动作快照外，还会带：
+
+- `hitEvent.attackDataName`
+  命中判定对象的原始名字，通常最接近游戏里的“招式名”
+- `hitEvent.damageDataName`
+  伤害数据名字
+- `hitEvent.damageType / damageAttackerType`
+  伤害类型信息
+- `hitEvent.totalDamage / physicalDamage / elementDamage / criticalResult`
+  本次命中的结算摘要
+- `hitEvent.recentMotionIds`
+  这次命中发生前，最近一小段 MotionID 历史
 
 每个 `transition` 条目里会包含：
 
@@ -217,6 +238,25 @@
 - 它前一跳和后一跳的大概上下文
 
 这样你后面分析太刀见切、居合时，就不用先在整份 JSON 里肉眼翻所有 transition 了，先搜 `focusConditions` 即可。
+
+## 命中招式名记录有什么用
+
+现在录制器除了动作树侧的信息，还会在真正造成伤害时，额外记录：
+
+- `AttackData:ToString()`
+
+这一层通常会直接出现类似：
+
+- `DummyHitShapeData(41_見切り斬り（成功）)`
+- `DummyHitShapeData(63_居合気刃斬り（成功）)`
+
+所以新版本更适合拿来做三层对照：
+
+- 动作树节点名
+- ActionIndex / Action 类型
+- 实际命中招式名
+
+后面要给某把武器做可配置 GP 时，这三层一起看会比只看动作树快很多。
 
 如果你已经明确知道当前要追的是：
 

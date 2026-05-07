@@ -74,7 +74,11 @@ local state = {
     lastSavedCount = 0,
     currentInfo = nil,
     outputPath = default_output_prefix .. ".json",
-    lastDumpPath = nil
+    lastDumpPath = nil,
+    recentMotionIds = {},
+    recentHitEvents = {},
+    lastHitEvent = nil,
+    nextHitEventId = 1
 }
 
 local max_reflection_field_count = 80
@@ -178,6 +182,16 @@ local function get_uptime()
     return method:call(nil)
 end
 
+local function clone_array(source)
+    local result = {}
+
+    for _, value in ipairs(source or {}) do
+        table.insert(result, value)
+    end
+
+    return result
+end
+
 local function get_display_language()
     local option_manager = sdk.get_managed_singleton("snow.gui.OptionManager")
     if not option_manager then
@@ -235,6 +249,49 @@ local function safe_call(fn)
     end
 
     return nil
+end
+
+local function get_master_player_index()
+    local master_player = get_master_player()
+    if not master_player then
+        return nil
+    end
+
+    return safe_call(function()
+        return master_player:call("getPlayerIndex")
+    end)
+end
+
+local function get_master_player_object_hash()
+    local master_player = get_master_player()
+    if not master_player then
+        return nil
+    end
+
+    return safe_call(function()
+        return master_player:call("get_GameObject"):call("GetHashCode")
+    end)
+end
+
+local function push_recent_motion_id(motion_id)
+    if motion_id == nil then
+        return
+    end
+
+    table.insert(state.recentMotionIds, 1, tonumber(motion_id))
+
+    while #state.recentMotionIds > 6 do
+        table.remove(state.recentMotionIds)
+    end
+end
+
+local function remember_hit_event(hit_event)
+    state.lastHitEvent = hit_event
+    table.insert(state.recentHitEvents, 1, hit_event)
+
+    while #state.recentHitEvents > 12 do
+        table.remove(state.recentHitEvents)
+    end
 end
 
 local function serialize_simple_value(value)
@@ -1489,12 +1546,14 @@ local function capture_snapshot()
         motionId = motion_id,
         motionBank = motion_bank,
         motionFrame = motion_frame,
+        recentMotionIds = clone_array(state.recentMotionIds),
         nodeId = node_id,
         nodeName = node:get_full_name(),
         actions = actions,
         transitions = transitions,
         startTransitions = start_transitions,
         focusConditions = build_focus_condition_report(node_id, node:get_full_name(), transitions, start_transitions),
+        lastHitEvent = state.lastHitEvent,
         nodeSummary = {
             actionCount = #actions,
             transitionCount = #transitions,
@@ -1525,6 +1584,19 @@ end
 local function append_snapshot(snapshot)
     table.insert(state.records, snapshot)
     state.lastSignature = snapshot.signature
+    save_records()
+end
+
+local function append_hit_snapshot(hit_event)
+    local snapshot = capture_snapshot()
+    if snapshot == nil then
+        return
+    end
+
+    snapshot.recordTrigger = "hit"
+    snapshot.hitEvent = hit_event
+    snapshot.signature = snapshot.signature .. "|hit|" .. tostring(hit_event.hitEventId or 0)
+    table.insert(state.records, snapshot)
     save_records()
 end
 
@@ -1594,6 +1666,108 @@ re.on_frame(function()
     end
 end)
 
+sdk.hook(
+    sdk.find_type_definition("snow.PlayerPlayMotion2"):get_method("playerWeaponMotion"),
+    function(args)
+        local manager = sdk.to_managed_object(args[2])
+        local arg = sdk.to_managed_object(args[3])
+        if not manager or not arg then
+            return
+        end
+
+        local owner_hash = safe_call(function()
+            return arg:call("get_OwnerGameObject"):call("GetHashCode")
+        end)
+
+        if owner_hash == nil or owner_hash ~= get_master_player_object_hash() then
+            return
+        end
+
+        push_recent_motion_id(safe_call(function()
+            return manager:call("get_MotionID")
+        end))
+    end
+)
+
+sdk.hook(
+    sdk.find_type_definition("snow.enemy.EnemyCharacterBase"):get_method("afterCalcDamage_DamageSide"),
+    function(args)
+        local damage_info = sdk.to_managed_object(args[3])
+        local hit_info = sdk.to_managed_object(args[4])
+        if not damage_info or not hit_info then
+            return
+        end
+
+        local master_player = get_master_player()
+        if not master_player then
+            return
+        end
+
+        local master_player_index = get_master_player_index()
+        if master_player_index == nil or damage_info:call("get_AttackerID") ~= master_player_index then
+            return
+        end
+
+        local weapon_type = master_player:get_field("_playerWeaponType")
+        local attack_data = safe_call(function()
+            return hit_info:call("get_AttackData")
+        end)
+        local damage_data = safe_call(function()
+            return hit_info:get_DamageData()
+        end)
+
+        local hit_event = {
+            hitEventId = state.nextHitEventId,
+            recordedAt = now_string(),
+            uptime = get_uptime(),
+            weaponType = weapon_type,
+            weaponName = weapon_names[weapon_type] or ("未知武器(" .. tostring(weapon_type) .. ")"),
+            weaponNameEn = weapon_names_en[weapon_type] or ("WeaponType" .. tostring(weapon_type)),
+            motionId = safe_call(function()
+                return master_player:call("getMotionID_Layer(System.Int32)", 0)
+            end),
+            motionBank = safe_call(function()
+                return master_player:call("getMotionBankID_Layer(System.Int32)", 0)
+            end),
+            motionFrame = safe_call(function()
+                return math.floor(master_player:call("getMotionNowFrame_Layer(System.Int32)", 0))
+            end),
+            recentMotionIds = clone_array(state.recentMotionIds),
+            attackDataName = safe_call(function()
+                return attack_data:call("ToString")
+            end),
+            damageDataName = safe_call(function()
+                return damage_data:get_Name()
+            end),
+            damageType = safe_call(function()
+                return damage_info:call("get_DamageType")
+            end),
+            damageAttackerType = safe_call(function()
+                return damage_info:call("get_DamageAttackerType")
+            end),
+            totalDamage = safe_call(function()
+                return damage_info:call("get_TotalDamage")
+            end),
+            physicalDamage = safe_call(function()
+                return damage_info:call("get_PhysicalDamage")
+            end),
+            elementDamage = safe_call(function()
+                return damage_info:call("get_ElementDamage")
+            end),
+            criticalResult = safe_call(function()
+                return damage_info:call("get_CriticalResult")
+            end)
+        }
+
+        state.nextHitEventId = state.nextHitEventId + 1
+        remember_hit_event(hit_event)
+
+        if state.recording then
+            append_hit_snapshot(hit_event)
+        end
+    end
+)
+
 local function draw_current_info()
     local info = state.currentInfo
     if not info then
@@ -1607,6 +1781,13 @@ local function draw_current_info()
     imgui.text("Node Name: " .. tostring(info.nodeName))
     imgui.text("重点 Conditions: " .. tostring(#info.focusConditions or 0))
     imgui.text("重型深挖: " .. (info.focusedProbe ~= nil and "已命中" or "未命中"))
+    imgui.text("最近 Motion 历史: " .. table.concat(info.recentMotionIds or {}, ", "))
+
+    if info.lastHitEvent ~= nil then
+        imgui.text("最近命中招式: " .. tostring(info.lastHitEvent.attackDataName or "UNKNOWN"))
+    else
+        imgui.text("最近命中招式: 暂无")
+    end
 
     if imgui.tree_node("当前节点 Actions [" .. tostring(#info.actions) .. "]") then
         for _, action in ipairs(info.actions) do
@@ -1665,6 +1846,9 @@ local function draw_last_record()
     imgui.text("武器: " .. tostring(last_record.weaponName))
     imgui.text("Motion Bank / ID: " .. tostring(last_record.motionBank) .. " / " .. tostring(last_record.motionId))
     imgui.text("Node: " .. tostring(last_record.nodeId))
+    if last_record.hitEvent ~= nil then
+        imgui.text("命中招式: " .. tostring(last_record.hitEvent.attackDataName or "UNKNOWN"))
+    end
     imgui.text("已写入文件: " .. state.outputPath)
 end
 
