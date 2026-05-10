@@ -228,6 +228,10 @@
   `snow.player.fsm.PlayerFsm2ConditionQuestBaseSeeThrough`
 - `6981`
   `snow.player.fsm.PlayerFsm2ConditionQuestBaseDamage`
+- `7026`
+  `snow.player.fsm.PlayerFsm2ConditionLongSwordIaiAutoCounter`
+- `7068 / 7069 / 7087 / 7088`
+  `snow.player.fsm.PlayerFsm2ConditionLongSwordIaiCounterDerived`
 
 每条 `focusConditions` 里会尽量带上：
 
@@ -272,8 +276,28 @@
 
 - 当前节点完整 actions
 - 当前节点完整 transitions
+- 当前节点里命中的重点 action 深探针
+- 全局重点 action 快捷探针
 - 重点 condition 对象自身的成员目录
+- 全局重点 condition 快捷探针
 - 重点 condition 实际跳到的关键节点
+
+现在对太刀居合专项，录制器还会额外重点盯这些 action：
+
+- `9250`
+  `snow.player.fsm.PlayerFsm2ActionSeeThroughAttack`
+- `9388`
+  `snow.player.fsm.PlayerFsm2ActionLongSwordEscapeMutekiTimerIaiCounterStep`
+- `9393`
+  `snow.player.fsm.PlayerFsm2ActionEscapeDamageCheck`
+- `9460`
+  `snow.player.fsm.PlayerFsm2ActionSeeThroughAttack`
+
+并且会把这些节点名自动纳入重型深挖命中条件：
+
+- `atk.atk151`
+- `atk.atk_147`
+- `atk.atk_161_MR`
 
 ## 工作方式
 

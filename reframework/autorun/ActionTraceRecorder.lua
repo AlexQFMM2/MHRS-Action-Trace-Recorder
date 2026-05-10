@@ -86,21 +86,42 @@ local max_reflection_property_count = 80
 local max_member_catalog_count = 120
 local focused_condition_indices = {
     [6944] = true,
-    [6981] = true
+    [6981] = true,
+    [7026] = true,
+    [7068] = true,
+    [7069] = true,
+    [7087] = true,
+    [7088] = true
 }
 local focused_condition_type_names = {
     ["snow.player.fsm.PlayerFsm2ConditionQuestBaseSeeThrough"] = true,
-    ["snow.player.fsm.PlayerFsm2ConditionQuestBaseDamage"] = true
+    ["snow.player.fsm.PlayerFsm2ConditionQuestBaseDamage"] = true,
+    ["snow.player.fsm.PlayerFsm2ConditionLongSwordIaiAutoCounter"] = true,
+    ["snow.player.fsm.PlayerFsm2ConditionLongSwordIaiCounterDerived"] = true
+}
+local focused_action_indices = {
+    [9250] = true,
+    [9388] = true,
+    [9393] = true,
+    [9460] = true
+}
+local focused_action_type_names = {
+    ["snow.player.fsm.PlayerFsm2ActionSeeThroughAttack"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionLongSwordEscapeMutekiTimerIaiCounterStep"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionEscapeDamageCheck"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionLongSwordSuccessIaiCounter"] = true
 }
 local focused_motion_ids = {
     [147] = true,
     [154] = true,
     [155] = true,
-    [156] = true
+    [156] = true,
+    [161] = true
 }
 local focused_node_name_markers = {
     "atk.atk_147",
-    "atk.atk151"
+    "atk.atk151",
+    "atk.atk_161_MR"
 }
 local method_catalog_keywords = {
     "frame",
@@ -114,6 +135,11 @@ local method_catalog_keywords = {
     "condition",
     "success",
     "counter",
+    "iai",
+    "evade",
+    "escape",
+    "auto",
+    "derived",
     "armor",
     "timer"
 }
@@ -123,6 +149,10 @@ local method_catalog_keywords = {
 local action_field_candidates = {
     "_StartFrame",
     "_EndFrame",
+    "_Frame",
+    "_frame",
+    "Type",
+    "_Type",
     "_MutekiStartFrame",
     "_MutekiEndFrame",
     "_InvincibleStartFrame",
@@ -138,6 +168,8 @@ local condition_field_candidates = {
     "EndFrame",
     "CkFrame",
     "CheckFrame",
+    "Type",
+    "_Type",
     "_StartFrame",
     "_EndFrame",
     "_CkFrame",
@@ -149,6 +181,8 @@ local condition_field_candidates = {
 local event_field_candidates = {
     "StartFrame",
     "EndFrame",
+    "Type",
+    "_Type",
     "_StartFrame",
     "_EndFrame"
 }
@@ -739,6 +773,18 @@ local function is_focused_condition(condition_info)
     return focused_condition_type_names[tostring(condition_info.typeName)] == true
 end
 
+local function is_focused_action(action_info)
+    if not action_info then
+        return false
+    end
+
+    if focused_action_indices[tonumber(action_info.index)] then
+        return true
+    end
+
+    return focused_action_type_names[tostring(action_info.typeName)] == true
+end
+
 local function is_focused_node_name(node_name)
     if not node_name then
         return false
@@ -753,7 +799,7 @@ local function is_focused_node_name(node_name)
     return false
 end
 
-local function should_build_focused_probe(motion_id, node_name, focus_conditions)
+local function should_build_focused_probe(motion_id, node_name, focus_conditions, actions)
     if focused_motion_ids[tonumber(motion_id)] then
         return true
     end
@@ -762,7 +808,23 @@ local function should_build_focused_probe(motion_id, node_name, focus_conditions
         return true
     end
 
+    for _, action_info in ipairs(actions or {}) do
+        if is_focused_action(action_info) then
+            return true
+        end
+    end
+
     return focus_conditions ~= nil and #focus_conditions > 0
+end
+
+local function build_global_probe_map(tree, index_map, probe_builder)
+    local result = {}
+
+    for index, _ in pairs(index_map or {}) do
+        result[tostring(index)] = probe_builder(tree, index)
+    end
+
+    return result
 end
 
 local function get_collection_size(collection)
@@ -981,6 +1043,18 @@ local function get_action_probe(tree, action_index)
     info.fieldCatalog = collect_field_catalog(action_obj, max_member_catalog_count)
     info.methodCatalog = collect_method_catalog(action_obj, max_member_catalog_count)
     return info
+end
+
+local function collect_matched_action_probes(tree, actions)
+    local result = {}
+
+    for _, action_info in ipairs(actions or {}) do
+        if is_focused_action(action_info) then
+            table.insert(result, get_action_probe(tree, action_info.index))
+        end
+    end
+
+    return result
 end
 
 local function get_condition_probe(tree, condition_index)
@@ -1312,16 +1386,17 @@ local function build_focused_probe(tree, node, motion_id, focus_conditions)
         add_related_state(item.targetState)
     end
 
+    local source_node_probe = build_node_probe(tree, node)
+
     return {
         motionId = motion_id,
         nodeId = node:get_id(),
         nodeName = node:get_full_name(),
-        sourceNode = build_node_probe(tree, node),
+        sourceNode = source_node_probe,
+        sourceMatchedActions = collect_matched_action_probes(tree, source_node_probe and source_node_probe.actions or nil),
         focusConditionProbes = focus_condition_probes,
-        globalFocusedConditions = {
-            ["6944"] = get_condition_probe(tree, 6944),
-            ["6981"] = get_condition_probe(tree, 6981)
-        },
+        globalFocusedActions = build_global_probe_map(tree, focused_action_indices, get_action_probe),
+        globalFocusedConditions = build_global_probe_map(tree, focused_condition_indices, get_condition_probe),
         relatedNodes = related_node_probes
     }
 end
@@ -1561,7 +1636,7 @@ local function capture_snapshot()
         }
     }
 
-    if should_build_focused_probe(motion_id, snapshot.nodeName, snapshot.focusConditions) then
+    if should_build_focused_probe(motion_id, snapshot.nodeName, snapshot.focusConditions, snapshot.actions) then
         snapshot.focusedProbe = build_focused_probe(tree, node, motion_id, snapshot.focusConditions)
     end
 
