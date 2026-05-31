@@ -68,6 +68,7 @@ local weapon_names_en = {
 
 local state = {
     recording = false,
+    weaponActionTraceEnabled = true,
     onlyWhenWeaponDrawn = true,
     records = {},
     lastSignature = nil,
@@ -2610,7 +2611,7 @@ re.on_frame(function()
         end
     end
 
-    if not state.recording or snapshot == nil then
+    if not state.recording or not state.weaponActionTraceEnabled or snapshot == nil then
         return
     end
 
@@ -2717,7 +2718,7 @@ sdk.hook(
         state.nextHitEventId = state.nextHitEventId + 1
         remember_hit_event(hit_event)
 
-        if state.recording then
+        if state.recording and state.weaponActionTraceEnabled then
             append_hit_snapshot(hit_event)
         end
     end
@@ -2944,9 +2945,11 @@ re.on_draw_ui(function()
 
         imgui.same_line()
         if imgui.button("强制记录当前动作") then
-            local snapshot = capture_snapshot()
-            if snapshot ~= nil then
-                append_snapshot(snapshot)
+            if state.weaponActionTraceEnabled then
+                local snapshot = capture_snapshot()
+                if snapshot ~= nil then
+                    append_snapshot(snapshot)
+                end
             end
         end
 
@@ -2965,9 +2968,18 @@ re.on_draw_ui(function()
             dump_monster_target()
         end
 
+        toggle, state.weaponActionTraceEnabled = imgui.checkbox("记录武器动作", state.weaponActionTraceEnabled)
+        if toggle then
+            state.lastSignature = nil
+        end
+
         toggle, state.onlyWhenWeaponDrawn = imgui.checkbox("只在拔刀时记录", state.onlyWhenWeaponDrawn)
         toggle, state.harvestMoonTraceEnabled = imgui.checkbox("记录圆月生命周期", state.harvestMoonTraceEnabled)
         toggle, state.monsterTargetTraceEnabled = imgui.checkbox("记录怪物目标采样", state.monsterTargetTraceEnabled)
+
+        if not state.weaponActionTraceEnabled then
+            imgui.text("武器动作记录已关闭，records 不会追加动作或命中快照。")
+        end
 
         if imgui.button("强制记录怪物目标") then
             append_monster_target_sample("manual", true)
