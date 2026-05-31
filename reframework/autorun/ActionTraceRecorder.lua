@@ -75,6 +75,10 @@ local state = {
     currentInfo = nil,
     outputPath = default_output_prefix .. ".json",
     lastDumpPath = nil,
+    lastHarvestMoonDumpPath = nil,
+    harvestMoonTraceEnabled = true,
+    harvestMoonEvents = {},
+    nextHarvestMoonEventId = 1,
     recentMotionIds = {},
     recentHitEvents = {},
     lastHitEvent = nil,
@@ -103,13 +107,22 @@ local focused_action_indices = {
     [9250] = true,
     [9388] = true,
     [9393] = true,
-    [9460] = true
+    [9460] = true,
+    [9529] = true,
+    [9530] = true,
+    [9531] = true
 }
 local focused_action_type_names = {
     ["snow.player.fsm.PlayerFsm2ActionSeeThroughAttack"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionEscape"] = true,
+    ["snow.player.fsm.PlayerFsm2EscapeMutekiTimer"] = true,
+    ["snow.player.fsm.PlayerFsm2MutekiTimer"] = true,
     ["snow.player.fsm.PlayerFsm2ActionLongSwordEscapeMutekiTimerIaiCounterStep"] = true,
     ["snow.player.fsm.PlayerFsm2ActionEscapeDamageCheck"] = true,
-    ["snow.player.fsm.PlayerFsm2ActionLongSwordSuccessIaiCounter"] = true
+    ["snow.player.fsm.PlayerFsm2ActionLongSwordSuccessIaiCounter"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionLongSwordCreateSpacingShell"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionSetEffect"] = true,
+    ["snow.player.fsm.PlayerFsm2ActionSetEffectAndScale"] = true
 }
 local focused_motion_ids = {
     [147] = true,
@@ -121,7 +134,8 @@ local focused_motion_ids = {
 local focused_node_name_markers = {
     "atk.atk_147",
     "atk.atk151",
-    "atk.atk_161_MR"
+    "atk.atk_161_MR",
+    "atk.WireReplaceF_MR"
 }
 local method_catalog_keywords = {
     "frame",
@@ -141,7 +155,34 @@ local method_catalog_keywords = {
     "auto",
     "derived",
     "armor",
-    "timer"
+    "timer",
+    "spacing",
+    "shell",
+    "destroy",
+    "disable",
+    "active",
+    "outside",
+    "create"
+}
+
+local harvest_moon_node_id = 3736120076
+local harvest_moon_action_indices = {
+    9526,
+    9527,
+    9528,
+    9529,
+    9530,
+    9531,
+    9532,
+    9533,
+    9534,
+    9535
+}
+local harvest_moon_type_names = {
+    "snow.player.LongSword",
+    "snow.shell.LongSwordShell010",
+    "snow.shell.LongSwordShellManager",
+    "snow.PlayerNetwork.LongSwordDestroySpacingShellPacket"
 }
 
 -- 这些字段名是“优先尝试读取”的候选项。
@@ -153,6 +194,10 @@ local action_field_candidates = {
     "_frame",
     "Type",
     "_Type",
+    "_EscapeType",
+    "_ElementDebuffReduceFrame",
+    "_AddFrame",
+    "_AddTime",
     "_MutekiStartFrame",
     "_MutekiEndFrame",
     "_InvincibleStartFrame",
@@ -160,7 +205,15 @@ local action_field_candidates = {
     "_JustStartFrame",
     "_JustEndFrame",
     "_HyperArmorTimer",
-    "_AngleRange"
+    "_AngleRange",
+    "_BaseScale",
+    "_CurrentScale",
+    "_ShellUniqueId",
+    "_IsOutSide",
+    "_lifeTime",
+    "_Range",
+    "_RangeY",
+    "_WarningRange"
 }
 
 local condition_field_candidates = {
@@ -741,6 +794,164 @@ local function collect_method_catalog(obj, max_count)
     end
 
     return result
+end
+
+local function collect_type_field_catalog(type_definition, max_count)
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local declaring_type = get_type_definition_name(current_type)
+        local fields = safe_call(function()
+            return current_type:get_fields()
+        end)
+
+        if fields then
+            for _, field_desc in ipairs(fields) do
+                if count >= max_count then
+                    break
+                end
+
+                local field_name = safe_call(function()
+                    return field_desc:get_name()
+                end)
+
+                if field_name ~= nil and not seen[field_name] then
+                    seen[field_name] = true
+                    local field_type = safe_call(function()
+                        return field_desc:get_type()
+                    end)
+
+                    table.insert(result, {
+                        name = field_name,
+                        typeName = get_type_definition_name(field_type),
+                        declaringType = declaring_type,
+                        readableSimpleValue = is_simple_type_definition(field_type)
+                    })
+                    count = count + 1
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if #result == 0 then
+        return nil
+    end
+
+    return result
+end
+
+local function collect_type_method_catalog(type_definition, max_count)
+    if not type_definition then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local declaring_type = get_type_definition_name(current_type)
+        local methods = safe_call(function()
+            return current_type:get_methods()
+        end)
+
+        if methods then
+            for _, method in ipairs(methods) do
+                if count >= max_count then
+                    break
+                end
+
+                local method_name = safe_call(function()
+                    return method:get_name()
+                end)
+                local param_count = safe_call(function()
+                    return method:get_num_params()
+                end)
+                local return_type = safe_call(function()
+                    return method:get_return_type()
+                end)
+                local signature_key = table.concat({
+                    tostring(method_name),
+                    tostring(param_count),
+                    get_type_definition_name(return_type),
+                    declaring_type
+                }, "|")
+
+                local getter_like = method_name ~= nil and (method_name:find("^get_") or method_name:find("^get"))
+                local should_keep = getter_like or matches_method_keyword(method_name)
+
+                if should_keep and not seen[signature_key] then
+                    seen[signature_key] = true
+                    table.insert(result, {
+                        name = method_name,
+                        declaringType = declaring_type,
+                        paramCount = param_count,
+                        returnType = get_type_definition_name(return_type),
+                        getterLike = getter_like and true or false,
+                        readableSimpleValue = is_simple_type_definition(return_type)
+                    })
+                    count = count + 1
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if #result == 0 then
+        return nil
+    end
+
+    return result
+end
+
+local function build_type_definition_catalog(type_name)
+    local type_definition = sdk.find_type_definition(type_name)
+    if not type_definition then
+        return {
+            typeName = type_name,
+            found = false
+        }
+    end
+
+    local hierarchy = {}
+    local current_type = type_definition
+    while current_type ~= nil do
+        table.insert(hierarchy, get_type_definition_name(current_type))
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    return {
+        typeName = type_name,
+        found = true,
+        hierarchy = hierarchy,
+        fields = collect_type_field_catalog(type_definition, max_member_catalog_count),
+        methods = collect_type_method_catalog(type_definition, max_member_catalog_count)
+    }
 end
 
 local function get_object_address(obj)
@@ -1449,7 +1660,7 @@ local function get_all_events(tree)
     return result
 end
 
-local function get_node_entry(tree, node)
+local function get_node_entry(tree, node, state_index)
     local node_data = node:get_data()
     local action_indices = {}
     local node_actions = node_data:get_actions()
@@ -1460,8 +1671,10 @@ local function get_node_entry(tree, node)
     end
 
     return {
+        stateIndex = state_index,
         id = node:get_id(),
         name = node:get_full_name(),
+        parent = get_node_parent_summary(node),
         actions = action_indices,
         transitions = get_transition_entries(
             tree,
@@ -1490,7 +1703,7 @@ local function get_all_nodes(tree)
     local size = get_collection_size(nodes)
 
     for i = 0, size - 1 do
-        table.insert(result, get_node_entry(tree, nodes[i]))
+        table.insert(result, get_node_entry(tree, nodes[i], i))
     end
 
     return result
@@ -1529,6 +1742,48 @@ local function build_tree_dump()
         conditions = get_all_conditions(tree),
         events = get_all_events(tree),
         nodes = get_all_nodes(tree)
+    }
+end
+
+local function build_harvest_moon_dump()
+    local master_player = get_master_player()
+    if not master_player then
+        return nil
+    end
+
+    local player_game_object = get_player_game_object(master_player)
+    local behavior_tree = get_behavior_tree(player_game_object)
+    local tree = get_tree_object(player_game_object)
+    if not behavior_tree or not tree then
+        return nil
+    end
+
+    local weapon_type = master_player:get_field("_playerWeaponType")
+    local target_node = tree:get_node_by_id(harvest_moon_node_id)
+    local action_probes = {}
+    local type_catalogs = {}
+
+    for _, action_index in ipairs(harvest_moon_action_indices) do
+        table.insert(action_probes, get_action_probe(tree, action_index))
+    end
+
+    for _, type_name in ipairs(harvest_moon_type_names) do
+        table.insert(type_catalogs, build_type_definition_catalog(type_name))
+    end
+
+    return {
+        version = 1,
+        dumpedAt = now_string(),
+        uptime = get_uptime(),
+        weaponType = weapon_type,
+        weaponName = weapon_names[weapon_type] or ("未知武器(" .. tostring(weapon_type) .. ")"),
+        weaponNameEn = weapon_names_en[weapon_type] or ("WeaponType" .. tostring(weapon_type)),
+        currentNodeId = behavior_tree:call("getCurrentNodeID", 0),
+        harvestMoonNodeId = harvest_moon_node_id,
+        harvestMoonNode = target_node and build_node_probe(tree, target_node) or nil,
+        harvestMoonActions = action_probes,
+        relatedTypes = type_catalogs,
+        recordedHarvestMoonEvents = clone_array(state.harvestMoonEvents)
     }
 end
 
@@ -1644,12 +1899,52 @@ local function capture_snapshot()
     return snapshot
 end
 
+local function capture_context_summary()
+    local master_player = get_master_player()
+    if not master_player then
+        return nil
+    end
+
+    local player_game_object = get_player_game_object(master_player)
+    local behavior_tree = get_behavior_tree(player_game_object)
+    local tree = get_tree_object(player_game_object)
+    local node_id = safe_call(function()
+        return behavior_tree and behavior_tree:call("getCurrentNodeID", 0)
+    end)
+    local node_name = nil
+
+    if tree ~= nil and node_id ~= nil then
+        node_name = safe_call(function()
+            local node = tree:get_node_by_id(node_id)
+            return node and node:get_full_name() or nil
+        end)
+    end
+
+    return {
+        uptime = get_uptime(),
+        weaponType = safe_get_field(master_player, "_playerWeaponType"),
+        weaponName = weapon_names[safe_get_field(master_player, "_playerWeaponType")] or nil,
+        motionId = safe_call(function()
+            return master_player:call("getMotionID_Layer(System.Int32)", 0)
+        end),
+        motionBank = safe_call(function()
+            return master_player:call("getMotionBankID_Layer(System.Int32)", 0)
+        end),
+        motionFrame = safe_call(function()
+            return math.floor(master_player:call("getMotionNowFrame_Layer(System.Int32)", 0))
+        end),
+        nodeId = node_id,
+        nodeName = node_name
+    }
+end
+
 local function save_records()
     local payload = {
         version = 1,
         updatedAt = now_string(),
         count = #state.records,
-        records = state.records
+        records = state.records,
+        harvestMoonEvents = state.harvestMoonEvents
     }
 
     json.dump_file(state.outputPath, payload)
@@ -1675,8 +1970,39 @@ local function append_hit_snapshot(hit_event)
     save_records()
 end
 
+local function append_harvest_moon_event(event_kind, obj, extra)
+    if not state.recording or not state.harvestMoonTraceEnabled then
+        return
+    end
+
+    local event = {
+        eventId = state.nextHarvestMoonEventId,
+        eventKind = event_kind,
+        recordedAt = now_string(),
+        context = capture_context_summary(),
+        object = obj ~= nil and {
+            typeName = get_type_name(obj),
+            address = get_object_address(obj),
+            fields = collect_reflection_fields(obj, max_reflection_field_count),
+            scannedProperties = collect_reflection_properties(obj, max_reflection_property_count),
+            typeHierarchy = collect_type_hierarchy(obj)
+        } or nil,
+        extra = extra
+    }
+
+    state.nextHarvestMoonEventId = state.nextHarvestMoonEventId + 1
+    table.insert(state.harvestMoonEvents, event)
+
+    while #state.harvestMoonEvents > 80 do
+        table.remove(state.harvestMoonEvents, 1)
+    end
+
+    save_records()
+end
+
 local function clear_records()
     state.records = {}
+    state.harvestMoonEvents = {}
     state.lastSignature = nil
     state.lastSavedCount = 0
     save_records()
@@ -1691,6 +2017,7 @@ local function load_existing_records()
     end
 
     state.records = payload.records
+    state.harvestMoonEvents = type(payload.harvestMoonEvents) == "table" and payload.harvestMoonEvents or {}
     state.lastSavedCount = #state.records
 
     if #state.records > 0 then
@@ -1704,8 +2031,10 @@ load_existing_records()
 local function begin_recording()
     state.outputPath = make_random_output_path(default_output_prefix)
     state.records = {}
+    state.harvestMoonEvents = {}
     state.lastSignature = nil
     state.lastSavedCount = 0
+    state.nextHarvestMoonEventId = 1
     state.recording = true
     save_records()
 end
@@ -1725,6 +2054,18 @@ local function dump_current_tree()
     local output_path = "ActionTreeDump_" .. weapon_name .. ".json"
     json.dump_file(output_path, payload)
     state.lastDumpPath = output_path
+    return output_path
+end
+
+local function dump_harvest_moon()
+    local payload = build_harvest_moon_dump()
+    if payload == nil then
+        return nil
+    end
+
+    local output_path = "HarvestMoonDump_" .. now_file_string() .. ".json"
+    json.dump_file(output_path, payload)
+    state.lastHarvestMoonDumpPath = output_path
     return output_path
 end
 
@@ -1842,6 +2183,120 @@ sdk.hook(
         end
     end
 )
+
+local function install_harvest_moon_event_hooks()
+    local longsword_type = sdk.find_type_definition("snow.player.LongSword")
+    local create_spacing_shell_method = longsword_type and longsword_type:get_method("createSpacingShell") or nil
+    if create_spacing_shell_method ~= nil then
+        safe_call(function()
+            sdk.hook(
+                create_spacing_shell_method,
+                function(args)
+                    local this = sdk.to_managed_object(args[2])
+                    append_harvest_moon_event("LongSword.createSpacingShell.pre", this)
+                end,
+                function(retval)
+                    append_harvest_moon_event("LongSword.createSpacingShell.post", nil)
+                    return retval
+                end
+            )
+            return true
+        end)
+    end
+
+    local shell_type = sdk.find_type_definition("snow.shell.LongSwordShell010")
+    local shell_method_names = {
+        "start",
+        "activate",
+        "setup",
+        "initialize",
+        "onStart",
+        "destroy",
+        "onDestroy",
+        "onDisable",
+        "deactivate",
+        "end",
+        "onEnd",
+        "onDeactivate",
+        "destroySelf",
+        "requestDestroy",
+        "forceDestroy"
+    }
+
+    if shell_type ~= nil then
+        for _, method_name in ipairs(shell_method_names) do
+            local method = shell_type:get_method(method_name)
+            if method ~= nil then
+                safe_call(function()
+                    sdk.hook(
+                        method,
+                        function(args)
+                            local this = sdk.to_managed_object(args[2])
+                            append_harvest_moon_event("LongSwordShell010." .. method_name, this)
+                        end,
+                        function(retval)
+                            return retval
+                        end
+                    )
+                    return true
+                end)
+            end
+        end
+    end
+
+    local packet_type = sdk.find_type_definition("snow.PlayerNetwork.LongSwordDestroySpacingShellPacket")
+    local packet_method_names = {
+        "setup",
+        "initialize",
+        "init",
+        "set",
+        "clear",
+        "read",
+        "write",
+        "serialize",
+        "deserialize",
+        "onSerialize",
+        "onDeserialize",
+        "pack",
+        "unpack",
+        "send",
+        "receive",
+        "execute",
+        "apply",
+        "copy",
+        "clone"
+    }
+
+    if packet_type ~= nil then
+        for _, method_name in ipairs(packet_method_names) do
+            local method = packet_type:get_method(method_name)
+            if method ~= nil then
+                safe_call(function()
+                    sdk.hook(
+                        method,
+                        function(args)
+                            local this = sdk.to_managed_object(args[2])
+                            append_harvest_moon_event(
+                                "LongSwordDestroySpacingShellPacket." .. method_name,
+                                this,
+                                {
+                                    shellUniqueId = safe_get_field(this, "_ShellUniqueId"),
+                                    isOutSide = safe_get_field(this, "_IsOutSide")
+                                }
+                            )
+                        end,
+                        function(retval)
+                            return retval
+                        end
+                    )
+                    return true
+                end)
+            end
+        end
+    end
+end
+
+install_harvest_moon_event_hooks()
 
 local function draw_current_info()
     local info = state.currentInfo
@@ -1961,13 +2416,23 @@ re.on_draw_ui(function()
             dump_current_tree()
         end
 
+        imgui.same_line()
+        if imgui.button("导出圆月专项 Dump") then
+            dump_harvest_moon()
+        end
+
         toggle, state.onlyWhenWeaponDrawn = imgui.checkbox("只在拔刀时记录", state.onlyWhenWeaponDrawn)
+        toggle, state.harvestMoonTraceEnabled = imgui.checkbox("记录圆月生命周期", state.harvestMoonTraceEnabled)
 
         imgui.text("录制状态: " .. (state.recording and "录制中" or "未录制"))
         imgui.text("记录数量: " .. tostring(#state.records))
+        imgui.text("圆月事件数量: " .. tostring(#state.harvestMoonEvents))
         imgui.text("录制文件: " .. state.outputPath)
         if state.lastDumpPath ~= nil then
             imgui.text("最近导出的整树文件: " .. state.lastDumpPath)
+        end
+        if state.lastHarvestMoonDumpPath ~= nil then
+            imgui.text("最近导出的圆月文件: " .. state.lastHarvestMoonDumpPath)
         end
 
         if imgui.tree_node("当前动作信息") then

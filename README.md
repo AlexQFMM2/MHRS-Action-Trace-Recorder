@@ -358,6 +358,30 @@
 7. 打完后点击 `停止录制`。
 8. 查看这次新生成的 `ActionTraceRecorder_*.json`。
 
+## 圆月专项排查
+
+为了排查太刀圆月的创建、出圈和消失链路，现在工具里额外有两个圆月相关入口：
+
+- `导出圆月专项 Dump`
+  - 输出 `HarvestMoonDump_*.json`
+  - 包含 `atk.WireReplaceF_MR.plw_LongSword_100_160` 节点、`9529/9530/9531` 等圆月创建/特效 action 深挖结果
+  - 包含 `snow.player.LongSword`、`snow.shell.LongSwordShell010`、`snow.shell.LongSwordShellManager`、`snow.PlayerNetwork.LongSwordDestroySpacingShellPacket` 的字段/方法目录
+- `记录圆月生命周期`
+  - 默认开启
+  - 在普通“开始录制”期间，把圆月相关事件追加到录制文件的 `harvestMoonEvents`
+  - 目前会尝试捕获 `createSpacingShell`、`LongSwordShell010` 的创建/销毁候选方法，以及 `LongSwordDestroySpacingShellPacket` 的候选读写/发送方法
+
+推荐排查流程：
+
+1. 装备太刀，打开 `Action Trace Recorder`。
+2. 确认 `记录圆月生命周期` 勾选。
+3. 点 `开始录制`。
+4. 释放圆月，走出圈，让圆月按原版逻辑消失。
+5. 点 `停止录制`。
+6. 把生成的 `ActionTraceRecorder_*.json` 里的 `harvestMoonEvents` 一起看。
+
+如果出圈没有触发 `LongSwordShell010.destroy/onDisable/deactivate`，但出现了 `LongSwordDestroySpacingShellPacket` 且 `_IsOutSide=true`，后续圆月自动重开就应该优先 hook 这个包或对应 manager 逻辑，而不是继续猜 shell 销毁方法。
+
 如果你想直接导出当前武器的完整动作树：
 
 1. 进游戏并装备目标武器。
