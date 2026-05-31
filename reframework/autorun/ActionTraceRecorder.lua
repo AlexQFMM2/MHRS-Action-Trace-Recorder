@@ -1875,6 +1875,36 @@ local function is_probable_runtime_object(value)
     end) == true
 end
 
+local function is_safe_zero_param_getter_name(method_name)
+    if method_name == nil then
+        return false
+    end
+
+    return method_name:find("^get_") ~= nil
+        or method_name:find("^get[A-Z_]") ~= nil
+        or method_name:find("^is[A-Z_]") ~= nil
+        or method_name:find("^has[A-Z_]") ~= nil
+end
+
+local function is_enemy_character_object(obj)
+    if obj == nil or not is_probable_runtime_object(obj) then
+        return false
+    end
+
+    local type_name = get_type_name(obj)
+    if type_name == "snow.enemy.EnemyCharacterBase" or type_name == "snow.enemy.EmBossCharacterBase" then
+        return true
+    end
+
+    for _, parent_name in ipairs(collect_type_hierarchy(obj) or {}) do
+        if parent_name == "snow.enemy.EnemyCharacterBase" or parent_name == "snow.enemy.EmBossCharacterBase" then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function get_runtime_collection_size(collection)
     if collection == nil then
         return 0
@@ -2053,12 +2083,7 @@ local function collect_monster_target_getters(obj, max_count)
                     return method:get_num_params()
                 end)
 
-                local getter_like = method_name ~= nil and (
-                    method_name:find("^get_") or
-                    method_name:find("^get") or
-                    method_name:find("^is") or
-                    method_name:find("^has")
-                )
+                local getter_like = is_safe_zero_param_getter_name(method_name)
 
                 if method_name ~= nil and param_count == 0 and getter_like and matches_monster_target_keyword(method_name) and not seen[method_name] then
                     seen[method_name] = true
@@ -2117,8 +2142,8 @@ local function build_monster_target_object_probe(obj, include_catalog)
     }
 end
 
-local function add_unique_monster_object(objects, seen, obj)
-    if obj == nil or not is_probable_runtime_object(obj) then
+local function add_unique_monster_object(objects, seen, obj, source_name)
+    if obj == nil or not is_enemy_character_object(obj) then
         return
     end
 
@@ -2127,12 +2152,12 @@ local function add_unique_monster_object(objects, seen, obj)
         return
     end
 
-    seen[address] = true
+    seen[address] = source_name or "unknown"
     table.insert(objects, obj)
 end
 
 local function remember_monster_target_object(obj)
-    if obj == nil or not is_probable_runtime_object(obj) then
+    if obj == nil or not is_enemy_character_object(obj) then
         return
     end
 
@@ -2167,7 +2192,7 @@ local function append_collection_monster_objects(objects, seen, collection, sour
         end
 
         local item = get_runtime_collection_item(collection, i)
-        add_unique_monster_object(objects, seen, item)
+        add_unique_monster_object(objects, seen, item, source_name)
     end
 end
 
@@ -2179,6 +2204,12 @@ local function collect_enemy_manager_runtime()
 
     local objects = {}
     local seen = {}
+    local field_collections = {
+        "_BossEnemyList",
+        "_ZakoEnemyList",
+        "_RegisterReserveEnemyList",
+        "_RequestDestroyEnemyList"
+    }
     local collection_getters = {
         "get_EnemyList",
         "get_EnemyCharacterList",
@@ -2194,6 +2225,19 @@ local function collect_enemy_manager_runtime()
         "getEnemyList",
         "findEnemyList"
     }
+
+    for _, field_name in ipairs(field_collections) do
+        if #objects >= max_monster_target_objects then
+            break
+        end
+
+        append_collection_monster_objects(
+            objects,
+            seen,
+            safe_get_field(manager, field_name),
+            "field:" .. field_name
+        )
+    end
 
     for _, getter_name in ipairs(collection_getters) do
         if #objects >= max_monster_target_objects then
@@ -2220,7 +2264,7 @@ local function collect_enemy_manager_runtime()
 
             if is_probable_runtime_object(value) then
                 append_collection_monster_objects(objects, seen, value, method_info.name)
-                add_unique_monster_object(objects, seen, value)
+                add_unique_monster_object(objects, seen, value, method_info.name)
             end
         end
     end
@@ -2230,13 +2274,15 @@ local function collect_enemy_manager_runtime()
             break
         end
 
-        add_unique_monster_object(objects, seen, observed_obj)
+        add_unique_monster_object(objects, seen, observed_obj, "observed:EnemyCharacterBase.afterCalcDamage_DamageSide")
     end
 
     local enemies = {}
     for index, obj in ipairs(objects) do
+        local address = get_object_address(obj) or tostring(obj)
         table.insert(enemies, {
             sourceIndex = index,
+            source = seen[address] or "unknown",
             probe = build_monster_target_object_probe(obj, true)
         })
     end

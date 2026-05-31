@@ -405,6 +405,9 @@
 - `EnemyManager` 上与 `target / hate / player / boss / unique / rank / point / lock / aim` 等关键词相关的简单字段和零参数 getter
 - 从 `EnemyManager` 常见列表入口里找到的怪物对象
 - 每个候选怪物对象的类型名、地址、继承链、关键词字段、关键词 getter、字段目录和方法目录
+- 每个怪物对象的来源入口，例如 `field:_BossEnemyList` 或命中 hook 观察到的 `EnemyCharacterBase`
+
+探针会优先读取 `EnemyManager` 的 `_BossEnemyList / _ZakoEnemyList` 等真实怪物实例列表，并过滤掉 `via.Prefab` 这类预制体资源，避免把资源文件误当成场上怪物。
 
 推荐排查流程：
 
