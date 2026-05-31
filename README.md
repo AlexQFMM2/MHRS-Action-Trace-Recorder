@@ -382,6 +382,43 @@
 
 如果出圈没有触发 `LongSwordShell010.destroy/onDisable/deactivate`，但出现了 `LongSwordDestroySpacingShellPacket` 且 `_IsOutSide=true`，后续圆月自动重开就应该优先 hook 这个包或对应 manager 逻辑，而不是继续猜 shell 销毁方法。
 
+## 怪物目标专项排查
+
+为了后续做“怪物切换仇恨时本机提示”，工具里现在加了怪物目标专项探针。第一轮只负责录数据，不会往聊天里发消息，也不会假定某个字段一定就是正式目标。
+
+新增入口：
+
+- `导出怪物目标专项 Dump`
+  - 输出 `MonsterTargetTrace_*.json`
+  - 包含 `EnemyManager` 当前运行时探针
+  - 包含 `EnemyCharacterBase`、`EnemyTargetInfo`、`EnemyTargetParam`、`EnemyUpdateTarget`、`EnemyPredatorUpdateTarget`、`HateCore` 等相关类型的字段/方法目录
+- `记录怪物目标采样`
+  - 默认开启
+  - 在普通“开始录制”期间，每约 `0.5s` 采样一次怪物目标候选值
+  - 采样结果写入录制文件的 `monsterTargetSamples`
+- `强制记录怪物目标`
+  - 不等定时采样，立即追加一条当前怪物目标样本，适合看到怪物明显换目标时手动点一下
+
+每条 `monsterTargetSamples` 会尽量记录：
+
+- 当前本地玩家 index
+- `EnemyManager` 上与 `target / hate / player / boss / unique / rank / point / lock / aim` 等关键词相关的简单字段和零参数 getter
+- 从 `EnemyManager` 常见列表入口里找到的怪物对象
+- 每个候选怪物对象的类型名、地址、继承链、关键词字段、关键词 getter、字段目录和方法目录
+
+推荐排查流程：
+
+1. 打开 `Action Trace Recorder`。
+2. 确认 `记录怪物目标采样` 勾选。
+3. 点击 `开始录制`。
+4. 单人或多人任务里让怪物攻击、转头、换目标。
+5. 看到明显切目标时，可以点一次 `强制记录怪物目标`。
+6. 点击 `停止录制`。
+7. 查看生成的 `ActionTraceRecorder_*.json` 里的 `monsterTargetSamples`。
+8. 需要静态目录和当前快照时，再点 `导出怪物目标专项 Dump`，查看 `MonsterTargetTrace_*.json`。
+
+后续只有在样本里确认某个 getter/字段能稳定对应真实目标玩家后，才适合把它做成独立的 `Monster Target Alert` Mod，并通过本机聊天信息窗口提示，例如 `[仇恨] 怪物 -> P2`。
+
 如果你想直接导出当前武器的完整动作树：
 
 1. 进游戏并装备目标武器。

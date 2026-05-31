@@ -76,14 +76,21 @@ local state = {
     outputPath = default_output_prefix .. ".json",
     lastDumpPath = nil,
     lastHarvestMoonDumpPath = nil,
+    lastMonsterTargetDumpPath = nil,
     harvestMoonTraceEnabled = true,
     harvestMoonEvents = {},
     nextHarvestMoonEventId = 1,
+    monsterTargetTraceEnabled = true,
+    monsterTargetSamples = {},
+    nextMonsterTargetSampleId = 1,
+    lastMonsterTargetSampleAt = nil,
     recentMotionIds = {},
     recentHitEvents = {},
     lastHitEvent = nil,
     nextHitEventId = 1
 }
+
+local save_records = nil
 
 local max_reflection_field_count = 80
 local max_reflection_property_count = 80
@@ -162,7 +169,17 @@ local method_catalog_keywords = {
     "disable",
     "active",
     "outside",
-    "create"
+    "create",
+    "target",
+    "hate",
+    "player",
+    "enemy",
+    "boss",
+    "unique",
+    "rank",
+    "point",
+    "lock",
+    "aim"
 }
 
 local harvest_moon_node_id = 3736120076
@@ -184,6 +201,46 @@ local harvest_moon_type_names = {
     "snow.shell.LongSwordShellManager",
     "snow.PlayerNetwork.LongSwordDestroySpacingShellPacket"
 }
+
+local monster_target_type_names = {
+    "snow.enemy.EnemyManager",
+    "snow.enemy.EnemyCharacterBase",
+    "snow.enemy.EmBossCharacterBase",
+    "snow.enemy.EnemyTargetInfo",
+    "snow.enemy.EnemyTargetParam",
+    "snow.enemy.EnemyTargetParam.EnemyHyakuryuHateSortInfo",
+    "snow.enemy.aifsm.EnemyUpdateTarget",
+    "snow.enemy.aifsm.EnemyPredatorUpdateTarget",
+    "snow.enemy.aifsm.Ems091_05EnemyUpdateTarget",
+    "snow.telemetry.kpi.Hate.HateCore",
+    "snow.sensor.PerceptionCombatStateData",
+    "snow.sensor.SensorLastDamage",
+    "snow.sensor.SensorLastHit"
+}
+
+local monster_target_sample_interval = 0.50
+local max_monster_target_samples = 80
+local max_monster_target_objects = 12
+local max_monster_target_values = 80
+
+local monster_target_keywords = {
+    "target",
+    "hate",
+    "player",
+    "enemy",
+    "boss",
+    "unique",
+    "rank",
+    "point",
+    "lock",
+    "aim",
+    "index",
+    "type",
+    "id"
+}
+
+local observed_monster_target_objects = {}
+local observed_monster_target_seen = {}
 
 -- 这些字段名是“优先尝试读取”的候选项。
 -- 它们并不保证所有类型都存在，但能帮助我们把常见的帧、无敌、判定相关字段尽量抓出来。
@@ -1787,6 +1844,456 @@ local function build_harvest_moon_dump()
     }
 end
 
+local function matches_monster_target_keyword(name)
+    if not name then
+        return false
+    end
+
+    local lower = tostring(name):lower()
+    for _, keyword in ipairs(monster_target_keywords) do
+        if lower:find(keyword, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function is_probable_runtime_object(value)
+    if value == nil then
+        return false
+    end
+
+    local value_type = type(value)
+    if value_type == "number" or value_type == "string" or value_type == "boolean" then
+        return false
+    end
+
+    return safe_call(function()
+        return value:get_type_definition() ~= nil
+    end) == true
+end
+
+local function get_runtime_collection_size(collection)
+    if collection == nil then
+        return 0
+    end
+
+    local size = get_collection_size(collection)
+    if size > 0 then
+        return size
+    end
+
+    local getter_names = {
+        "get_Count",
+        "get_Length",
+        "get_Size",
+        "get_count",
+        "get_length"
+    }
+
+    for _, getter_name in ipairs(getter_names) do
+        local value = safe_call(function()
+            return collection:call(getter_name)
+        end)
+
+        if value ~= nil then
+            return tonumber(value) or 0
+        end
+    end
+
+    return 0
+end
+
+local function get_runtime_collection_item(collection, index)
+    if collection == nil then
+        return nil
+    end
+
+    local item = safe_call(function()
+        return collection[index]
+    end)
+
+    if item ~= nil then
+        return item
+    end
+
+    local getter_names = {
+        "get_Item(System.Int32)",
+        "get_Item",
+        "get(System.Int32)",
+        "get",
+        "at(System.Int32)",
+        "at"
+    }
+
+    for _, getter_name in ipairs(getter_names) do
+        item = safe_call(function()
+            return collection:call(getter_name, index)
+        end)
+
+        if item ~= nil then
+            return item
+        end
+    end
+
+    return nil
+end
+
+local function collect_monster_target_fields(obj, max_count)
+    if obj == nil then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if type_definition == nil then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local declaring_type = get_type_definition_name(current_type)
+        local fields = safe_call(function()
+            return current_type:get_fields()
+        end)
+
+        if fields then
+            for _, field_desc in ipairs(fields) do
+                if count >= max_count then
+                    break
+                end
+
+                local field_name = safe_call(function()
+                    return field_desc:get_name()
+                end)
+
+                if field_name ~= nil and not seen[field_name] and matches_monster_target_keyword(field_name) then
+                    seen[field_name] = true
+
+                    local field_type = safe_call(function()
+                        return field_desc:get_type()
+                    end)
+
+                    if is_simple_type_definition(field_type) then
+                        local value = safe_call(function()
+                            return field_desc:get_data(obj)
+                        end)
+
+                        if value ~= nil then
+                            result[field_name] = {
+                                typeName = get_type_definition_name(field_type),
+                                declaringType = declaring_type,
+                                value = serialize_simple_value(value)
+                            }
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if next(result) == nil then
+        return nil
+    end
+
+    return result
+end
+
+local function collect_monster_target_getters(obj, max_count)
+    if obj == nil then
+        return nil
+    end
+
+    local type_definition = safe_call(function()
+        return obj:get_type_definition()
+    end)
+
+    if type_definition == nil then
+        return nil
+    end
+
+    local result = {}
+    local seen = {}
+    local count = 0
+    local current_type = type_definition
+
+    while current_type ~= nil do
+        local declaring_type = get_type_definition_name(current_type)
+        local methods = safe_call(function()
+            return current_type:get_methods()
+        end)
+
+        if methods then
+            for _, method in ipairs(methods) do
+                if count >= max_count then
+                    break
+                end
+
+                local method_name = safe_call(function()
+                    return method:get_name()
+                end)
+                local param_count = safe_call(function()
+                    return method:get_num_params()
+                end)
+
+                local getter_like = method_name ~= nil and (
+                    method_name:find("^get_") or
+                    method_name:find("^get") or
+                    method_name:find("^is") or
+                    method_name:find("^has")
+                )
+
+                if method_name ~= nil and param_count == 0 and getter_like and matches_monster_target_keyword(method_name) and not seen[method_name] then
+                    seen[method_name] = true
+
+                    local return_type = safe_call(function()
+                        return method:get_return_type()
+                    end)
+
+                    if is_simple_type_definition(return_type) then
+                        local value = safe_call(function()
+                            return method:call(obj)
+                        end)
+
+                        if value ~= nil then
+                            result[method_name] = {
+                                typeName = get_type_definition_name(return_type),
+                                declaringType = declaring_type,
+                                value = serialize_simple_value(value)
+                            }
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if count >= max_count then
+            break
+        end
+
+        current_type = safe_call(function()
+            return current_type:get_parent_type()
+        end)
+    end
+
+    if next(result) == nil then
+        return nil
+    end
+
+    return result
+end
+
+local function build_monster_target_object_probe(obj, include_catalog)
+    if obj == nil then
+        return nil
+    end
+
+    return {
+        typeName = get_type_name(obj),
+        address = get_object_address(obj),
+        typeHierarchy = collect_type_hierarchy(obj),
+        candidateFields = collect_monster_target_fields(obj, max_monster_target_values),
+        candidateGetters = collect_monster_target_getters(obj, max_monster_target_values),
+        fieldCatalog = include_catalog and collect_field_catalog(obj, max_monster_target_values) or nil,
+        methodCatalog = include_catalog and collect_method_catalog(obj, max_monster_target_values) or nil
+    }
+end
+
+local function add_unique_monster_object(objects, seen, obj)
+    if obj == nil or not is_probable_runtime_object(obj) then
+        return
+    end
+
+    local address = get_object_address(obj) or tostring(obj)
+    if seen[address] then
+        return
+    end
+
+    seen[address] = true
+    table.insert(objects, obj)
+end
+
+local function remember_monster_target_object(obj)
+    if obj == nil or not is_probable_runtime_object(obj) then
+        return
+    end
+
+    local address = get_object_address(obj) or tostring(obj)
+    if observed_monster_target_seen[address] then
+        return
+    end
+
+    observed_monster_target_seen[address] = true
+    table.insert(observed_monster_target_objects, obj)
+
+    while #observed_monster_target_objects > max_monster_target_objects do
+        local removed = table.remove(observed_monster_target_objects, 1)
+        local removed_address = get_object_address(removed) or tostring(removed)
+        observed_monster_target_seen[removed_address] = nil
+    end
+end
+
+local function append_collection_monster_objects(objects, seen, collection, source_name)
+    if collection == nil then
+        return
+    end
+
+    local size = get_runtime_collection_size(collection)
+    if size <= 0 then
+        return
+    end
+
+    for i = 0, size - 1 do
+        if #objects >= max_monster_target_objects then
+            return
+        end
+
+        local item = get_runtime_collection_item(collection, i)
+        add_unique_monster_object(objects, seen, item)
+    end
+end
+
+local function collect_enemy_manager_runtime()
+    local manager = sdk.get_managed_singleton("snow.enemy.EnemyManager")
+    if manager == nil then
+        return nil
+    end
+
+    local objects = {}
+    local seen = {}
+    local collection_getters = {
+        "get_EnemyList",
+        "get_EnemyCharacterList",
+        "get_BossList",
+        "get_BossEnemyList",
+        "get_EmList",
+        "get_EnemyArray",
+        "get_EnemyData",
+        "get_EnemyCharacters",
+        "get_BossEnemy",
+        "get_BossEnemyList()",
+        "getEmList",
+        "getEnemyList",
+        "findEnemyList"
+    }
+
+    for _, getter_name in ipairs(collection_getters) do
+        if #objects >= max_monster_target_objects then
+            break
+        end
+
+        local collection = safe_call(function()
+            return manager:call(getter_name)
+        end)
+
+        append_collection_monster_objects(objects, seen, collection, getter_name)
+    end
+
+    local method_catalog = collect_method_catalog(manager, max_monster_target_values)
+    for _, method_info in ipairs(method_catalog or {}) do
+        if #objects >= max_monster_target_objects then
+            break
+        end
+
+        if method_info.paramCount == 0 and method_info.getterLike and matches_monster_target_keyword(method_info.name) then
+            local value = safe_call(function()
+                return manager:call(method_info.name)
+            end)
+
+            if is_probable_runtime_object(value) then
+                append_collection_monster_objects(objects, seen, value, method_info.name)
+                add_unique_monster_object(objects, seen, value)
+            end
+        end
+    end
+
+    for _, observed_obj in ipairs(observed_monster_target_objects) do
+        if #objects >= max_monster_target_objects then
+            break
+        end
+
+        add_unique_monster_object(objects, seen, observed_obj)
+    end
+
+    local enemies = {}
+    for index, obj in ipairs(objects) do
+        table.insert(enemies, {
+            sourceIndex = index,
+            probe = build_monster_target_object_probe(obj, true)
+        })
+    end
+
+    return {
+        manager = build_monster_target_object_probe(manager, true),
+        discoveredEnemyCount = #enemies,
+        enemies = enemies
+    }
+end
+
+local function capture_monster_target_sample(reason)
+    return {
+        sampleId = state.nextMonsterTargetSampleId,
+        recordedAt = now_string(),
+        uptime = get_uptime(),
+        reason = reason or "manual",
+        masterPlayerIndex = get_master_player_index(),
+        enemyRuntime = collect_enemy_manager_runtime()
+    }
+end
+
+local function append_monster_target_sample(reason, force)
+    if not force and (not state.recording or not state.monsterTargetTraceEnabled) then
+        return nil
+    end
+
+    local sample = capture_monster_target_sample(reason)
+    state.nextMonsterTargetSampleId = state.nextMonsterTargetSampleId + 1
+    state.lastMonsterTargetSampleAt = sample.uptime
+    table.insert(state.monsterTargetSamples, sample)
+
+    while #state.monsterTargetSamples > max_monster_target_samples do
+        table.remove(state.monsterTargetSamples, 1)
+    end
+
+    save_records()
+    return sample
+end
+
+local function build_monster_target_dump()
+    return {
+        version = 1,
+        dumpedAt = now_string(),
+        uptime = get_uptime(),
+        masterPlayerIndex = get_master_player_index(),
+        enemyRuntime = collect_enemy_manager_runtime(),
+        relatedTypes = (function()
+            local type_catalogs = {}
+            for _, type_name in ipairs(monster_target_type_names) do
+                table.insert(type_catalogs, build_type_definition_catalog(type_name))
+            end
+            return type_catalogs
+        end)(),
+        recordedMonsterTargetSamples = clone_array(state.monsterTargetSamples)
+    }
+end
+
 local function build_signature(snapshot)
     local action_indices = {}
 
@@ -1938,13 +2445,14 @@ local function capture_context_summary()
     }
 end
 
-local function save_records()
+function save_records()
     local payload = {
         version = 1,
         updatedAt = now_string(),
         count = #state.records,
         records = state.records,
-        harvestMoonEvents = state.harvestMoonEvents
+        harvestMoonEvents = state.harvestMoonEvents,
+        monsterTargetSamples = state.monsterTargetSamples
     }
 
     json.dump_file(state.outputPath, payload)
@@ -2003,8 +2511,12 @@ end
 local function clear_records()
     state.records = {}
     state.harvestMoonEvents = {}
+    state.monsterTargetSamples = {}
     state.lastSignature = nil
     state.lastSavedCount = 0
+    state.nextHarvestMoonEventId = 1
+    state.nextMonsterTargetSampleId = 1
+    state.lastMonsterTargetSampleAt = nil
     save_records()
 end
 
@@ -2018,7 +2530,10 @@ local function load_existing_records()
 
     state.records = payload.records
     state.harvestMoonEvents = type(payload.harvestMoonEvents) == "table" and payload.harvestMoonEvents or {}
+    state.monsterTargetSamples = type(payload.monsterTargetSamples) == "table" and payload.monsterTargetSamples or {}
     state.lastSavedCount = #state.records
+    state.nextHarvestMoonEventId = #state.harvestMoonEvents + 1
+    state.nextMonsterTargetSampleId = #state.monsterTargetSamples + 1
 
     if #state.records > 0 then
         local last_record = state.records[#state.records]
@@ -2032,9 +2547,12 @@ local function begin_recording()
     state.outputPath = make_random_output_path(default_output_prefix)
     state.records = {}
     state.harvestMoonEvents = {}
+    state.monsterTargetSamples = {}
     state.lastSignature = nil
     state.lastSavedCount = 0
     state.nextHarvestMoonEventId = 1
+    state.nextMonsterTargetSampleId = 1
+    state.lastMonsterTargetSampleAt = nil
     state.recording = true
     save_records()
 end
@@ -2069,9 +2587,28 @@ local function dump_harvest_moon()
     return output_path
 end
 
+local function dump_monster_target()
+    local payload = build_monster_target_dump()
+    if payload == nil then
+        return nil
+    end
+
+    local output_path = "MonsterTargetTrace_" .. now_file_string() .. ".json"
+    json.dump_file(output_path, payload)
+    state.lastMonsterTargetDumpPath = output_path
+    return output_path
+end
+
 re.on_frame(function()
     local snapshot = capture_snapshot()
     state.currentInfo = snapshot
+
+    if state.recording and state.monsterTargetTraceEnabled then
+        local uptime = get_uptime()
+        if state.lastMonsterTargetSampleAt == nil or uptime - state.lastMonsterTargetSampleAt >= monster_target_sample_interval then
+            append_monster_target_sample("interval")
+        end
+    end
 
     if not state.recording or snapshot == nil then
         return
@@ -2108,6 +2645,8 @@ sdk.hook(
 sdk.hook(
     sdk.find_type_definition("snow.enemy.EnemyCharacterBase"):get_method("afterCalcDamage_DamageSide"),
     function(args)
+        remember_monster_target_object(sdk.to_managed_object(args[2]))
+
         local damage_info = sdk.to_managed_object(args[3])
         local hit_info = sdk.to_managed_object(args[4])
         if not damage_info or not hit_info then
@@ -2421,18 +2960,32 @@ re.on_draw_ui(function()
             dump_harvest_moon()
         end
 
+        imgui.same_line()
+        if imgui.button("导出怪物目标专项 Dump") then
+            dump_monster_target()
+        end
+
         toggle, state.onlyWhenWeaponDrawn = imgui.checkbox("只在拔刀时记录", state.onlyWhenWeaponDrawn)
         toggle, state.harvestMoonTraceEnabled = imgui.checkbox("记录圆月生命周期", state.harvestMoonTraceEnabled)
+        toggle, state.monsterTargetTraceEnabled = imgui.checkbox("记录怪物目标采样", state.monsterTargetTraceEnabled)
+
+        if imgui.button("强制记录怪物目标") then
+            append_monster_target_sample("manual", true)
+        end
 
         imgui.text("录制状态: " .. (state.recording and "录制中" or "未录制"))
         imgui.text("记录数量: " .. tostring(#state.records))
         imgui.text("圆月事件数量: " .. tostring(#state.harvestMoonEvents))
+        imgui.text("怪物目标采样数量: " .. tostring(#state.monsterTargetSamples))
         imgui.text("录制文件: " .. state.outputPath)
         if state.lastDumpPath ~= nil then
             imgui.text("最近导出的整树文件: " .. state.lastDumpPath)
         end
         if state.lastHarvestMoonDumpPath ~= nil then
             imgui.text("最近导出的圆月文件: " .. state.lastHarvestMoonDumpPath)
+        end
+        if state.lastMonsterTargetDumpPath ~= nil then
+            imgui.text("最近导出的怪物目标文件: " .. state.lastMonsterTargetDumpPath)
         end
 
         if imgui.tree_node("当前动作信息") then
